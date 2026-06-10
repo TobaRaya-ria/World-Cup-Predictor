@@ -64,44 +64,43 @@ server.listen(PORT, "127.0.0.1", () => {
 
 async function handleSignup(request, response) {
   const body = await readJson(request);
-  const email = normalizeEmail(body.email);
-  const username = String(body.username || "").trim();
+  const username = normalizeUsername(body.username);
   const password = String(body.password || "");
-  const provider = String(body.provider || "email");
-  if (!email || !username || password.length < 6) {
-    return sendJson(response, 400, { error: "Username, email, and a 6+ character password are required." });
+  const provider = String(body.provider || "username");
+  if (!isValidUsername(username) || password.length < 6) {
+    return sendJson(response, 400, { error: "Use a valid username and a 6+ character password." });
   }
 
   const users = readCsv(USERS_FILE);
-  if (users.some((user) => normalizeEmail(user.email) === email)) {
-    return sendJson(response, 409, { error: "That email already has an account. Please log in." });
+  if (users.some((user) => normalizeUsername(user.username) === username)) {
+    return sendJson(response, 409, { error: "That username already has an account. Please log in." });
   }
 
   users.push({
     created_at: new Date().toISOString(),
     username,
-    email,
+    email: "",
     provider,
     password_hash: hashPassword(password),
   });
   writeCsv(USERS_FILE, userHeaders, users);
-  return sendJson(response, 200, { user: { username, email, provider } });
+  return sendJson(response, 200, { user: { username, email: "", provider } });
 }
 
 async function handleLogin(request, response) {
   const body = await readJson(request);
-  const email = normalizeEmail(body.email);
+  const username = normalizeUsername(body.username);
   const password = String(body.password || "");
   const users = readCsv(USERS_FILE);
-  const user = users.find((item) => normalizeEmail(item.email) === email);
+  const user = users.find((item) => normalizeUsername(item.username) === username);
   if (!user || user.password_hash !== hashPassword(password)) {
-    return sendJson(response, 401, { error: "Email or password is wrong." });
+    return sendJson(response, 401, { error: "Username or password is wrong." });
   }
   return sendJson(response, 200, {
     user: {
       username: user.username,
-      email: user.email,
-      provider: user.provider || "email",
+      email: user.email || "",
+      provider: user.provider || "username",
     },
   });
 }
@@ -109,15 +108,16 @@ async function handleLogin(request, response) {
 async function handleSave(request, response) {
   const body = await readJson(request);
   const user = body.user || {};
+  const username = normalizeUsername(user.username);
   const email = normalizeEmail(user.email);
-  if (!email) return sendJson(response, 400, { error: "Log in before saving predictions." });
+  if (!username && !email) return sendJson(response, 400, { error: "Log in before saving predictions." });
 
   const rows = readCsv(PREDICTIONS_FILE);
   const next = {
     saved_at: new Date().toISOString(),
-    username: user.username || email.split("@")[0],
+    username: username || email.split("@")[0],
     email,
-    provider: user.provider || "email",
+    provider: user.provider || "username",
     has_predictions: String(Boolean(body.hasPredictions)),
     has_results: String(Boolean(body.hasResults)),
     bracket_score: String(Number(body.bracketScore || 0).toFixed(1)),
@@ -128,7 +128,9 @@ async function handleSave(request, response) {
     knockout_picks_json: JSON.stringify(body.knockoutPicks || {}),
     match_predictions_json: JSON.stringify(body.matchPredictions || {}),
   };
-  const existingIndex = rows.findIndex((row) => normalizeEmail(row.email) === email);
+  const existingIndex = rows.findIndex((row) =>
+    email ? normalizeEmail(row.email) === email : normalizeUsername(row.username) === username
+  );
   if (existingIndex >= 0) {
     rows[existingIndex] = next;
   } else {
@@ -256,6 +258,14 @@ function csvEscape(value) {
 
 function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
+}
+
+function normalizeUsername(username) {
+  return String(username || "").trim().toLowerCase();
+}
+
+function isValidUsername(username) {
+  return /^[a-z0-9_]{3,24}$/.test(username);
 }
 
 function hashPassword(password) {

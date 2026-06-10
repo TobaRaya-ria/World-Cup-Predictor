@@ -139,15 +139,11 @@
         </div>
         <label>
           Username
-          <input id="usernameInput" placeholder="Displayed in standing" />
-        </label>
-        <label>
-          Email
-          <input id="emailInput" type="email" required placeholder="you@example.com" />
+          <input id="usernameInput" required minlength="3" maxlength="24" autocomplete="username" placeholder="letters, numbers, underscores" />
         </label>
         <label>
           Password
-          <input id="passwordInput" type="password" required minlength="6" placeholder="6+ characters" />
+          <input id="passwordInput" type="password" required minlength="6" autocomplete="current-password" placeholder="6+ characters" />
         </label>
         <div class="dialog-actions">
           <button id="authSubmit" type="submit" class="primary-button">Log in</button>

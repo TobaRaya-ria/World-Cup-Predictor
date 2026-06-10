@@ -6,6 +6,7 @@
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
   const API_BASE = API_ENABLED ? location.origin : "";
   const LOCAL_API_ENABLED = API_ENABLED && ["127.0.0.1", "localhost"].includes(location.hostname);
+  const INTERNAL_AUTH_DOMAIN = "worldcup-predictor.invalid";
 
   const initialGroups = {
     A: [
@@ -118,7 +119,6 @@
       "closeAuth",
       "googleMock",
       "usernameInput",
-      "emailInput",
       "passwordInput",
       "resetGroups",
       "clearKnockout",
@@ -217,7 +217,7 @@
     dom.authTitle.textContent = isLogin ? "Log in" : "Create Predictor Profile";
     dom.authEyebrow.textContent = isLogin ? "Welcome back" : "Save your entry";
     dom.authSubmit.textContent = isLogin ? "Log in" : "Sign up";
-    dom.usernameInput.required = !isLogin;
+    dom.usernameInput.required = true;
     dom.loginMode.classList.toggle("active", isLogin);
     dom.signupMode.classList.toggle("active", !isLogin);
   }
@@ -225,18 +225,19 @@
   async function authenticate(mode, override) {
     const payload = override || {
       username: dom.usernameInput.value.trim(),
-      email: dom.emailInput.value.trim(),
       password: dom.passwordInput.value,
-      provider: "email",
+      provider: "username",
     };
-    if (mode === "signup" && !payload.username) {
-      flashSave("Username required");
+    const username = normalizeUsername(payload.username);
+    if (!isValidUsername(username)) {
+      flashSave("Use 3-24 letters, numbers, or underscores");
       return;
     }
-    if (!payload.email || !payload.password) {
-      flashSave("Email and password required");
+    if (!payload.password) {
+      flashSave("Password required");
       return;
     }
+    payload.username = username;
 
     try {
       if (supabaseReady) {
@@ -256,27 +257,37 @@
   }
 
   async function authenticateWithSupabase(mode, payload) {
-    const email = payload.email.trim();
+    const username = normalizeUsername(payload.username);
+    const email = authEmailForUsername(username);
     const password = payload.password;
     if (mode === "signup") {
+      const { data: existingProfile, error: profileError } = await supabaseClient
+        .from("profiles")
+        .select("id")
+        .eq("username", username)
+        .maybeSingle();
+      if (profileError) throw profileError;
+      if (existingProfile) throw new Error("That username is already taken.");
+
       const { data, error } = await supabaseClient.auth.signUp({
         email,
         password,
         options: {
           data: {
-            username: payload.username,
-            display_name: payload.username,
+            username,
+            display_name: username,
+            auth_type: "username",
           },
         },
       });
       if (error) throw error;
-      if (!data.user) throw new Error("Check your email to finish signup.");
+      if (!data.user) throw new Error("Signup failed. Please try again.");
       if (!data.session) {
-        throw new Error("Check your email to confirm signup, then log in.");
+        throw new Error("Email confirmations are still on in Supabase. Turn them off, then try again.");
       }
-      await ensureProfile(data.user, payload.username);
+      const profile = await ensureProfile(data.user, username);
       await loadRemotePredictions(data.user.id);
-      return userFromAuth(data.user, payload.username);
+      return userFromProfile(data.user, profile);
     }
 
     const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
@@ -310,30 +321,39 @@
   }
 
   async function setUserFromSupabase(authUser) {
-    const profile = await ensureProfile(authUser, authUser.user_metadata?.username || authUser.email?.split("@")[0]);
-    state.user = {
-      id: authUser.id,
-      username: profile.username,
-      email: profile.email || authUser.email,
-      provider: "supabase",
-    };
+    const profile = await ensureProfile(authUser, authUser.user_metadata?.username || usernameFromAuthEmail(authUser.email));
+    state.user = userFromProfile(authUser, profile);
   }
 
   async function ensureProfile(authUser, preferredUsername) {
-    const fallbackUsername = preferredUsername || authUser.email?.split("@")[0] || "Predictor";
+    const fallbackUsername =
+      normalizeUsername(preferredUsername) || normalizeUsername(usernameFromAuthEmail(authUser.email)) || `predictor_${authUser.id.slice(0, 8)}`;
+    const publicEmail = isInternalAuthEmail(authUser.email) ? null : authUser.email;
     const { data: existing, error: selectError } = await supabaseClient
       .from("profiles")
       .select("id, username, display_name, email, avatar_url")
       .eq("id", authUser.id)
       .maybeSingle();
     if (selectError) throw selectError;
-    if (existing) return existing;
+    if (existing) {
+      if (isInternalAuthEmail(existing.email)) {
+        const { data, error } = await supabaseClient
+          .from("profiles")
+          .update({ email: null })
+          .eq("id", authUser.id)
+          .select("id, username, display_name, email, avatar_url")
+          .single();
+        if (error) throw error;
+        return data;
+      }
+      return existing;
+    }
 
     const profile = {
       id: authUser.id,
       username: fallbackUsername,
       display_name: fallbackUsername,
-      email: authUser.email,
+      email: publicEmail,
       avatar_url: authUser.user_metadata?.avatar_url || "",
     };
     const { data, error } = await supabaseClient.from("profiles").upsert(profile, { onConflict: "id" }).select().single();
@@ -349,11 +369,11 @@
     return data;
   }
 
-  function userFromAuth(authUser, username) {
+  function userFromProfile(authUser, profile) {
     return {
       id: authUser.id,
-      username: username || authUser.user_metadata?.username || authUser.email?.split("@")[0],
-      email: authUser.email,
+      username: profile.username,
+      email: profile.email || "",
       provider: "supabase",
     };
   }
@@ -633,7 +653,7 @@
     } else {
       dom.profilePanel.innerHTML = `
         <p><strong>${escapeHtml(state.user.username)}</strong></p>
-        <p class="muted">${escapeHtml(state.user.email)}</p>
+        ${state.user.email ? `<p class="muted">${escapeHtml(state.user.email)}</p>` : ""}
         <p>Bracket: <strong>${bracketScore.toFixed(1)} pts</strong></p>
         <p>Matches: <strong>${matchScore.toFixed(1)} pts</strong></p>
         <p>Total: <strong>${total.toFixed(1)} pts</strong></p>
@@ -1095,6 +1115,27 @@
 
   function team(code, name) {
     return { code, name };
+  }
+
+  function normalizeUsername(username) {
+    return String(username || "").trim().toLowerCase();
+  }
+
+  function isValidUsername(username) {
+    return /^[a-z0-9_]{3,24}$/.test(username);
+  }
+
+  function authEmailForUsername(username) {
+    return `${normalizeUsername(username)}@${INTERNAL_AUTH_DOMAIN}`;
+  }
+
+  function usernameFromAuthEmail(email) {
+    const value = String(email || "").trim().toLowerCase();
+    return isInternalAuthEmail(value) ? value.split("@")[0] : "";
+  }
+
+  function isInternalAuthEmail(email) {
+    return String(email || "").trim().toLowerCase().endsWith(`@${INTERNAL_AUTH_DOMAIN}`);
   }
 
   function buildSeededFixtures() {

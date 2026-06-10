@@ -22,7 +22,10 @@ begin
     new.id,
     coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1)),
     coalesce(new.raw_user_meta_data->>'display_name', new.raw_user_meta_data->>'username', split_part(new.email, '@', 1)),
-    new.email,
+    case
+      when lower(new.email) like '%@worldcup-predictor.invalid' then null
+      else new.email
+    end,
     coalesce(new.raw_user_meta_data->>'avatar_url', '')
   )
   on conflict (id) do nothing;
