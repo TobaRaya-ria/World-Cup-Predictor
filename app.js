@@ -1,0 +1,1021 @@
+(function () {
+  "use strict";
+
+  const TOURNAMENT_START = new Date("2026-06-11T12:00:00-06:00");
+  const SAVE_KEY = "wc26-predictor-v2";
+  const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
+  const API_BASE = API_ENABLED ? location.origin : "";
+
+  const initialGroups = {
+    A: [
+      team("MEX", "Mexico"),
+      team("RSA", "South Africa"),
+      team("KOR", "Korea Republic"),
+      team("CZE", "Czechia"),
+    ],
+    B: [
+      team("CAN", "Canada"),
+      team("BIH", "Bosnia and Herzegovina"),
+      team("QAT", "Qatar"),
+      team("SUI", "Switzerland"),
+    ],
+    C: [team("BRA", "Brazil"), team("MAR", "Morocco"), team("HAI", "Haiti"), team("SCO", "Scotland")],
+    D: [team("USA", "USA"), team("PAR", "Paraguay"), team("AUS", "Australia"), team("TUR", "Turkiye")],
+    E: [
+      team("CIV", "Cote d'Ivoire"),
+      team("ECU", "Ecuador"),
+      team("GER", "Germany"),
+      team("CUW", "Curacao"),
+    ],
+    F: [team("NED", "Netherlands"), team("JPN", "Japan"), team("SWE", "Sweden"), team("TUN", "Tunisia")],
+    G: [team("IRN", "IR Iran"), team("NZL", "New Zealand"), team("BEL", "Belgium"), team("EGY", "Egypt")],
+    H: [
+      team("KSA", "Saudi Arabia"),
+      team("URU", "Uruguay"),
+      team("ESP", "Spain"),
+      team("CPV", "Cabo Verde"),
+    ],
+    I: [team("FRA", "France"), team("SEN", "Senegal"), team("IRQ", "Iraq"), team("NOR", "Norway")],
+    J: [team("ARG", "Argentina"), team("ALG", "Algeria"), team("AUT", "Austria"), team("JOR", "Jordan")],
+    K: [team("POR", "Portugal"), team("COD", "Congo DR"), team("UZB", "Uzbekistan"), team("COL", "Colombia")],
+    L: [team("GHA", "Ghana"), team("PAN", "Panama"), team("ENG", "England"), team("CRO", "Croatia")],
+  };
+
+  const venues = [
+    "Mexico City Stadium",
+    "Estadio Guadalajara",
+    "Toronto Stadium",
+    "Los Angeles Stadium",
+    "Boston Stadium",
+    "BC Place Vancouver",
+    "New York New Jersey Stadium",
+    "San Francisco Bay Area Stadium",
+    "Philadelphia Stadium",
+    "Houston Stadium",
+    "Dallas Stadium",
+    "Estadio Monterrey",
+    "Miami Stadium",
+    "Atlanta Stadium",
+    "Seattle Stadium",
+    "Kansas City Stadium",
+  ];
+
+  const seededFixtures = buildSeededFixtures();
+
+  const matchPoints = {
+    "group-1": 1,
+    "group-2": 1.2,
+    "group-3": 1.3,
+    "round-32": 1.5,
+    "round-16": 2.5,
+    quarter: 5,
+    semi: 7,
+    third: 8,
+    final: 12,
+  };
+
+  const state = loadState();
+  const dom = {};
+  let authMode = "login";
+
+  document.addEventListener("DOMContentLoaded", init);
+
+  function init() {
+    cacheDom();
+    bindEvents();
+    refreshAll();
+    setInterval(renderMatches, 60000);
+  }
+
+  function cacheDom() {
+    [
+      "groupsGrid",
+      "thirdPlaceGrid",
+      "thirdCounter",
+      "knockoutGrid",
+      "placementGrid",
+      "projectedScore",
+      "lockNote",
+      "saveStatus",
+      "authButton",
+      "authDialog",
+      "authForm",
+      "authTitle",
+      "authEyebrow",
+      "authSubmit",
+      "loginMode",
+      "signupMode",
+      "closeAuth",
+      "googleMock",
+      "usernameInput",
+      "emailInput",
+      "passwordInput",
+      "resetGroups",
+      "clearKnockout",
+      "refreshMatches",
+      "matchSummary",
+      "matchesList",
+      "profilePanel",
+      "leaderboard",
+      "exportCsv",
+      "rulesGrid",
+    ].forEach((id) => {
+      dom[id] = document.getElementById(id);
+    });
+  }
+
+  function bindEvents() {
+    document.querySelectorAll(".tab-button").forEach((button) => {
+      button.addEventListener("click", () => switchTab(button.dataset.tab));
+    });
+
+    dom.resetGroups.addEventListener("click", () => {
+      state.groups = cloneGroups(initialGroups);
+      state.thirdQualifiers = defaultThirdQualifiers();
+      state.knockoutPicks = {};
+      persist();
+      refreshAll();
+    });
+
+    dom.clearKnockout.addEventListener("click", () => {
+      state.knockoutPicks = {};
+      persist();
+      refreshAll();
+    });
+
+    dom.refreshMatches.addEventListener("click", () => {
+      renderMatches();
+      flashSave("Match list refreshed");
+    });
+
+    dom.authButton.addEventListener("click", () => {
+      setAuthMode(state.user ? "login" : "login");
+      dom.authDialog.showModal();
+    });
+
+    dom.closeAuth.addEventListener("click", () => dom.authDialog.close());
+
+    dom.loginMode.addEventListener("click", () => setAuthMode("login"));
+    dom.signupMode.addEventListener("click", () => setAuthMode("signup"));
+    dom.exportCsv.addEventListener("click", exportSpreadsheet);
+
+    dom.authForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      await authenticate(authMode);
+    });
+
+    dom.googleMock.addEventListener("click", async () => {
+      const username = dom.usernameInput.value.trim() || "Google Predictor";
+      await authenticate("signup", {
+        username,
+        email: dom.emailInput.value.trim() || "google-user@example.com",
+        password: "google-demo-login",
+        provider: "google",
+      });
+    });
+  }
+
+  function setAuthMode(mode) {
+    authMode = mode;
+    const isLogin = mode === "login";
+    dom.authTitle.textContent = isLogin ? "Log in" : "Create Predictor Profile";
+    dom.authEyebrow.textContent = isLogin ? "Welcome back" : "Save your entry";
+    dom.authSubmit.textContent = isLogin ? "Log in" : "Sign up";
+    dom.usernameInput.required = !isLogin;
+    dom.loginMode.classList.toggle("active", isLogin);
+    dom.signupMode.classList.toggle("active", !isLogin);
+  }
+
+  async function authenticate(mode, override) {
+    const payload = override || {
+      username: dom.usernameInput.value.trim(),
+      email: dom.emailInput.value.trim(),
+      password: dom.passwordInput.value,
+      provider: "email",
+    };
+    if (mode === "signup" && !payload.username) {
+      flashSave("Username required");
+      return;
+    }
+    if (!payload.email || !payload.password) {
+      flashSave("Email and password required");
+      return;
+    }
+
+    try {
+      if (API_ENABLED) {
+        const response = await apiPost(`/api/${mode}`, payload);
+        state.user = response.user;
+      } else {
+        state.user = {
+          username: payload.username || payload.email.split("@")[0],
+          email: payload.email,
+          provider: payload.provider || "email",
+        };
+      }
+      await persist();
+      dom.authDialog.close();
+      refreshAll();
+    } catch (error) {
+      flashSave(error.message || "Login failed");
+    }
+  }
+
+  async function apiPost(path, payload) {
+    const response = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Request failed");
+    return data;
+  }
+
+  function switchTab(tab) {
+    document.querySelectorAll(".tab-button").forEach((button) => {
+      button.classList.toggle("active", button.dataset.tab === tab);
+    });
+    document.querySelectorAll(".tab-panel").forEach((panel) => {
+      panel.classList.toggle("active", panel.id === tab);
+    });
+  }
+
+  function refreshAll() {
+    renderHeader();
+    renderGroups();
+    renderThirds();
+    renderKnockout();
+    renderPlacements();
+    renderMatches();
+    renderStanding();
+    renderRules();
+  }
+
+  function renderHeader() {
+    const locked = Date.now() >= TOURNAMENT_START.getTime();
+    dom.lockNote.textContent = locked
+      ? "Whole bracket is locked because the World Cup has started."
+      : "Points stay 0 until official results are loaded.";
+    dom.authButton.textContent = state.user ? state.user.username : "Log in / Sign up";
+    dom.projectedScore.textContent = `${calculateBracketScore().toFixed(1)} pts`;
+  }
+
+  function renderGroups() {
+    dom.groupsGrid.innerHTML = "";
+    Object.entries(state.groups).forEach(([group, teams]) => {
+      const card = el("article", "group-card");
+      card.innerHTML = `<div class="group-title"><span>Group ${group}</span><small>Drag 1-4</small></div>`;
+      const list = el("ol", "team-list");
+      teams.forEach((item, index) => {
+        const li = el("li", "team-item");
+        li.draggable = !isBracketLocked();
+        li.dataset.group = group;
+        li.dataset.index = index;
+        li.innerHTML = `
+          <span class="rank-badge">${index + 1}</span>
+          <span>${escapeHtml(item.name)}</span>
+          <span class="team-code">${item.code}</span>
+        `;
+        li.addEventListener("dragstart", onDragStart);
+        li.addEventListener("dragover", onDragOver);
+        li.addEventListener("dragleave", () => li.classList.remove("drag-over"));
+        li.addEventListener("drop", onDrop);
+        list.appendChild(li);
+      });
+      card.appendChild(list);
+      dom.groupsGrid.appendChild(card);
+    });
+  }
+
+  function renderThirds() {
+    const thirds = Object.entries(state.groups).map(([group, teams]) => ({ group, team: teams[2] }));
+    if (state.thirdQualifiers.length !== 8) {
+      state.thirdQualifiers = defaultThirdQualifiers();
+    }
+    dom.thirdCounter.textContent = `${state.thirdQualifiers.length} / 8 selected`;
+    dom.thirdPlaceGrid.innerHTML = "";
+    thirds.forEach(({ group, team: item }) => {
+      const selected = state.thirdQualifiers.includes(group);
+      const disabled = !selected && state.thirdQualifiers.length >= 8;
+      const button = el("button", `third-button${selected ? " selected" : ""}`);
+      button.disabled = disabled || isBracketLocked();
+      button.innerHTML = `
+        <span><strong>Group ${group}</strong><br>${escapeHtml(item.name)}</span>
+        <span class="team-code">${selected ? "QUAL" : "OUT"}</span>
+      `;
+      button.addEventListener("click", () => {
+        if (selected) {
+          state.thirdQualifiers = state.thirdQualifiers.filter((g) => g !== group);
+        } else if (state.thirdQualifiers.length < 8) {
+          state.thirdQualifiers.push(group);
+        }
+        state.knockoutPicks = {};
+        persist();
+        refreshAll();
+      });
+      dom.thirdPlaceGrid.appendChild(button);
+    });
+  }
+
+  function renderKnockout() {
+    const rounds = buildKnockoutRounds();
+    dom.knockoutGrid.innerHTML = "";
+    rounds.forEach((round) => {
+      const column = el("div", "round-column");
+      column.appendChild(textEl("div", "round-title", round.name));
+      round.matches.forEach((match) => {
+        const box = el("div", "ko-match");
+        box.innerHTML = `<span class="ko-label">${match.id}</span>`;
+        match.teams.forEach((item) => {
+          const isActive = Boolean(item && state.knockoutPicks[match.id] === item.code);
+          const button = el("button", `team-pick${isActive ? " active" : ""}`);
+          button.disabled = !item || isBracketLocked();
+          button.textContent = item ? item.name : "TBD";
+          button.addEventListener("click", () => {
+            state.knockoutPicks[match.id] = item.code;
+            clearDownstream(match.id);
+            persist();
+            refreshAll();
+          });
+          box.appendChild(button);
+        });
+        column.appendChild(box);
+      });
+      dom.knockoutGrid.appendChild(column);
+    });
+  }
+
+  function renderPlacements() {
+    const placements = calculatePlacements();
+    const order = [
+      ["winner", "1 Winner"],
+      ["runner", "2 Runner-up"],
+      ["third", "3 Third place"],
+      ["fourth", "4 Fourth place"],
+      ["qf", "5-8"],
+      ["r16", "9-16"],
+      ["r32", "17-32"],
+      ["grouped", "Grouped"],
+    ];
+    dom.placementGrid.innerHTML = "";
+    order.forEach(([key, title]) => {
+      const card = el("article", "placement-card");
+      const teams = placements[key] || [];
+      card.innerHTML = `<strong>${title}</strong>`;
+      const list = el("div", "team-chip-list");
+      if (teams.length) {
+        teams.forEach((item) => list.appendChild(textEl("span", "team-chip", item.name)));
+      } else {
+        list.appendChild(textEl("span", "muted", "Waiting for picks"));
+      }
+      card.appendChild(list);
+      dom.placementGrid.appendChild(card);
+    });
+  }
+
+  function renderMatches() {
+    const now = Date.now();
+    const fixtures = getLiveFixtures().sort((a, b) => a.kickoff - b.kickoff);
+    const done = fixtures.filter((match) => match.kickoff < now && match.result);
+    const upcoming = fixtures.filter((match) => match.kickoff >= now);
+    const nearestIds = new Set(upcoming.slice(0, 3).map((match) => match.id));
+    const currentRound = detectCurrentRound(fixtures, now);
+    const ordered = [...done.reverse(), ...upcoming];
+
+    dom.matchSummary.innerHTML = "";
+    upcoming.slice(0, 3).forEach((match) => {
+      const card = el("article", "match-card nearest");
+      card.innerHTML = `
+        <div>
+          <div class="match-teams">${escapeHtml(match.home)} vs ${escapeHtml(match.away)}</div>
+          <div class="match-meta">${formatDate(match.kickoff)} · ${escapeHtml(match.venue)}</div>
+        </div>
+      `;
+      dom.matchSummary.appendChild(card);
+    });
+
+    dom.matchesList.innerHTML = "";
+    ordered.forEach((match) => {
+      const isNearest = nearestIds.has(match.id);
+      const canPredict = match.kickoff > now && match.round === currentRound;
+      const shouldFade = !isNearest && (!canPredict || match.kickoff < now);
+      const card = el("article", `match-card${isNearest ? " nearest" : ""}${shouldFade ? " faded" : ""}`);
+      const prediction = state.matchPredictions[match.id] || {};
+      const resultText = match.result ? `Result ${match.result.home}-${match.result.away}` : "Result pending";
+      const status = match.result ? scorePredictionLabel(match, prediction) : canPredict ? "Open" : "Locked";
+      card.innerHTML = `
+        <div>
+          <div class="match-teams">${escapeHtml(match.home)} vs ${escapeHtml(match.away)}</div>
+          <div class="match-meta">${formatDate(match.kickoff)} · ${escapeHtml(match.venue)} · ${escapeHtml(match.label)} · ${resultText} · ${status}</div>
+        </div>
+      `;
+      const box = el("div", "prediction-box");
+      const home = scoreInput(prediction.home, canPredict);
+      const away = scoreInput(prediction.away, canPredict);
+      const select = el("select");
+      select.disabled = !canPredict;
+      const outcomes = match.round.startsWith("group") ? ["Home", "Draw", "Away"] : ["Home", "Away"];
+      outcomes.forEach((outcome) => {
+        const option = el("option");
+        option.value = outcome;
+        option.textContent = outcome === "Home" ? `${match.home} win` : outcome === "Away" ? `${match.away} win` : "Draw";
+        option.selected = prediction.outcome === outcome;
+        select.appendChild(option);
+      });
+      [home, away, select].forEach((control) => {
+        control.addEventListener("change", () => {
+          state.matchPredictions[match.id] = {
+            home: home.value,
+            away: away.value,
+            outcome: select.value,
+            lockedAt: match.kickoff,
+          };
+          persist();
+          renderStanding();
+        });
+      });
+      box.append(home, away, select);
+      card.appendChild(box);
+      dom.matchesList.appendChild(card);
+    });
+  }
+
+  function renderStanding() {
+    const matchScore = calculateMatchScore();
+    const bracketScore = calculateBracketScore();
+    const total = bracketScore + matchScore;
+    const hasPredictions = hasAnyPrediction();
+    const hasResults = hasAnyResults();
+
+    if (!state.user) {
+      dom.profilePanel.innerHTML = `<div class="empty-state">Log in or sign up before your predictions are saved to the spreadsheet.</div>`;
+    } else {
+      dom.profilePanel.innerHTML = `
+        <p><strong>${escapeHtml(state.user.username)}</strong></p>
+        <p class="muted">${escapeHtml(state.user.email)}</p>
+        <p>Bracket: <strong>${bracketScore.toFixed(1)} pts</strong></p>
+        <p>Matches: <strong>${matchScore.toFixed(1)} pts</strong></p>
+        <p>Total: <strong>${total.toFixed(1)} pts</strong></p>
+        <p class="muted">${hasResults ? "Results loaded, points are active." : "Points stay empty until official results are loaded."}</p>
+      `;
+    }
+
+    dom.leaderboard.innerHTML = "";
+    if (!state.user || !hasPredictions || !hasResults) {
+      dom.leaderboard.innerHTML = `<div class="empty-state">No standings yet. Users appear here after they log in, make predictions, and official results are available.</div>`;
+      return;
+    }
+
+    const rows = [{ username: state.user.username, points: total, current: true }];
+    rows.forEach((row, index) => {
+      const item = el("div", `leaderboard-row${row.current ? " current" : ""}`);
+      item.innerHTML = `
+        <strong>#${index + 1}</strong>
+        <span>${escapeHtml(row.username)}</span>
+        <strong>${row.points.toFixed(1)}</strong>
+      `;
+      dom.leaderboard.appendChild(item);
+    });
+  }
+
+  function renderRules() {
+    const rules = [
+      "Grouped: 1 point per correct nation",
+      "17-32: 1.5 points",
+      "9-16: 2 points",
+      "5-8: 3.5 points",
+      "3-4 range: 5 points, exact 3rd or 4th: 6.5",
+      "Grand final participant: 8 points",
+      "Runner-up: 10 points",
+      "Winner: 15 points",
+      "50% in grouped / 17-32 / 9-16: +2, 75%: +5",
+      "All 3rd, 4th, finalists, runner-up, winner right: +7.5",
+      "Match exact score doubles the round points",
+      "Match points rise from 1 in group MD1 to 12 in the final",
+    ];
+    dom.rulesGrid.innerHTML = "";
+    rules.forEach((rule) => {
+      dom.rulesGrid.appendChild(textEl("div", "rule-card", rule));
+    });
+  }
+
+  function onDragStart(event) {
+    event.dataTransfer.setData(
+      "application/json",
+      JSON.stringify({ group: event.currentTarget.dataset.group, index: Number(event.currentTarget.dataset.index) })
+    );
+  }
+
+  function onDragOver(event) {
+    event.preventDefault();
+    event.currentTarget.classList.add("drag-over");
+  }
+
+  function onDrop(event) {
+    event.preventDefault();
+    const target = event.currentTarget;
+    target.classList.remove("drag-over");
+    const source = JSON.parse(event.dataTransfer.getData("application/json"));
+    const group = target.dataset.group;
+    const targetIndex = Number(target.dataset.index);
+    if (source.group !== group || source.index === targetIndex) return;
+    const teams = state.groups[group];
+    const [moved] = teams.splice(source.index, 1);
+    teams.splice(targetIndex, 0, moved);
+    state.knockoutPicks = {};
+    persist();
+    refreshAll();
+  }
+
+  function buildKnockoutRounds() {
+    const thirdMap = assignThirdPlaces();
+    const seed = (type, group) => {
+      const index = type === "W" ? 0 : type === "R" ? 1 : 2;
+      return state.groups[group]?.[index] || null;
+    };
+    const third = (slot) => {
+      const group = thirdMap[slot];
+      return group ? seed("T", group) : null;
+    };
+    const r32 = [
+      ko("R32-1", seed("W", "A"), third("1A")),
+      ko("R32-2", seed("R", "A"), seed("R", "B")),
+      ko("R32-3", seed("W", "C"), seed("R", "F")),
+      ko("R32-4", seed("W", "E"), third("1E")),
+      ko("R32-5", seed("W", "I"), third("1I")),
+      ko("R32-6", seed("R", "E"), seed("R", "I")),
+      ko("R32-7", seed("W", "G"), third("1G")),
+      ko("R32-8", seed("R", "C"), seed("W", "F")),
+      ko("R32-9", seed("W", "B"), third("1B")),
+      ko("R32-10", seed("W", "D"), third("1D")),
+      ko("R32-11", seed("R", "D"), seed("R", "G")),
+      ko("R32-12", seed("W", "H"), seed("R", "J")),
+      ko("R32-13", seed("W", "J"), seed("R", "H")),
+      ko("R32-14", seed("W", "K"), third("1K")),
+      ko("R32-15", seed("W", "L"), third("1L")),
+      ko("R32-16", seed("R", "K"), seed("R", "L")),
+    ];
+    const r16 = pairRound("R16", r32);
+    const qf = pairRound("QF", r16);
+    const sf = pairRound("SF", qf);
+    const final = [ko("FINAL", winner(sf[0]), winner(sf[1]))];
+    const thirdMatch = [ko("THIRD", loser(sf[0]), loser(sf[1]))];
+    return [
+      { name: "Round of 32", matches: r32 },
+      { name: "Round of 16", matches: r16 },
+      { name: "Quarter-finals", matches: qf },
+      { name: "Semi-finals", matches: sf },
+      { name: "Final", matches: final },
+      { name: "Third place", matches: thirdMatch },
+    ];
+  }
+
+  function pairRound(prefix, previous) {
+    const matches = [];
+    for (let i = 0; i < previous.length; i += 2) {
+      matches.push(ko(`${prefix}-${i / 2 + 1}`, winner(previous[i]), winner(previous[i + 1])));
+    }
+    return matches;
+  }
+
+  function winner(match) {
+    if (!match) return null;
+    const code = state.knockoutPicks[match.id];
+    return match.teams.find((item) => item?.code === code) || null;
+  }
+
+  function loser(match) {
+    if (!match) return null;
+    const code = state.knockoutPicks[match.id];
+    if (!code) return null;
+    return match.teams.find((item) => item?.code !== code) || null;
+  }
+
+  function clearDownstream(matchId) {
+    const prefixes = ["R32", "R16", "QF", "SF", "FINAL", "THIRD"];
+    const currentIndex = prefixes.findIndex((prefix) => matchId.startsWith(prefix));
+    Object.keys(state.knockoutPicks).forEach((id) => {
+      const index = prefixes.findIndex((prefix) => id.startsWith(prefix));
+      if (index > currentIndex) delete state.knockoutPicks[id];
+    });
+  }
+
+  function assignThirdPlaces() {
+    const preferences = {
+      "1A": ["C", "E", "F", "H", "I", "D", "J", "L"],
+      "1B": ["E", "F", "G", "H", "J", "C", "I", "K"],
+      "1D": ["B", "C", "E", "G", "I", "J", "A", "L"],
+      "1E": ["A", "B", "C", "D", "F", "G", "H", "K"],
+      "1G": ["A", "B", "E", "H", "I", "J", "C", "L"],
+      "1I": ["C", "D", "E", "G", "H", "J", "B", "K"],
+      "1K": ["D", "E", "I", "J", "L", "A", "F", "G"],
+      "1L": ["A", "C", "D", "F", "I", "K", "L", "B"],
+    };
+    const available = [...state.thirdQualifiers];
+    const assigned = {};
+    Object.entries(preferences).forEach(([slot, list]) => {
+      const group = list.find((candidate) => available.includes(candidate)) || available[0];
+      if (group) {
+        assigned[slot] = group;
+        available.splice(available.indexOf(group), 1);
+      }
+    });
+    return assigned;
+  }
+
+  function calculatePlacements() {
+    const rounds = buildKnockoutRounds();
+    const r32 = rounds[0].matches;
+    const r16 = rounds[1].matches;
+    const qf = rounds[2].matches;
+    const sf = rounds[3].matches;
+    const final = rounds[4].matches[0];
+    const third = rounds[5].matches[0];
+    const advancedCodes = new Set([
+      ...Object.entries(state.groups).flatMap(([group, teams]) => [
+        teams[0].code,
+        teams[1].code,
+        ...(state.thirdQualifiers.includes(group) ? [teams[2].code] : []),
+      ]),
+    ]);
+    const allTeams = Object.values(state.groups).flat();
+    return {
+      winner: compact([winner(final)]),
+      runner: compact([loser(final)]),
+      third: compact([winner(third)]),
+      fourth: compact([loser(third)]),
+      qf: qf.map(loser).filter(Boolean),
+      r16: r16.map(loser).filter(Boolean),
+      r32: r32.map(loser).filter(Boolean),
+      grouped: allTeams.filter((item) => !advancedCodes.has(item.code)),
+    };
+  }
+
+  function calculateBracketScore() {
+    return hasAnyResults() ? 0 : 0;
+  }
+
+  function calculateMatchScore() {
+    return getLiveFixtures().reduce((total, match) => {
+      const prediction = state.matchPredictions[match.id];
+      if (!prediction || !match.result) return total;
+      const base = matchPoints[match.round] || 0;
+      const actualOutcome = match.result.home === match.result.away ? "Draw" : match.result.home > match.result.away ? "Home" : "Away";
+      if (prediction.outcome !== actualOutcome) return total;
+      const exact = Number(prediction.home) === match.result.home && Number(prediction.away) === match.result.away;
+      return total + (exact ? base * 2 : base);
+    }, 0);
+  }
+
+  function scorePredictionLabel(match, prediction) {
+    if (!prediction.outcome) return "No prediction";
+    const actualOutcome = match.result.home === match.result.away ? "Draw" : match.result.home > match.result.away ? "Home" : "Away";
+    const exact = Number(prediction.home) === match.result.home && Number(prediction.away) === match.result.away;
+    if (prediction.outcome !== actualOutcome) return "Wrong";
+    return exact ? "Exact score" : "Correct result";
+  }
+
+  function detectCurrentRound(fixtures, now) {
+    const upcoming = fixtures.find((match) => match.kickoff >= now);
+    return upcoming ? upcoming.round : "final";
+  }
+
+  function getLiveFixtures() {
+    return seededFixtures.map((match) => ({ ...match }));
+  }
+
+  async function persist() {
+    localStorage.setItem(SAVE_KEY, JSON.stringify(state));
+    if (API_ENABLED && state.user) {
+      try {
+        await apiPost("/api/save", serializeSubmission());
+      } catch (error) {
+        flashSave("Saved locally; spreadsheet offline");
+        return;
+      }
+    }
+    flashSave("Saved");
+  }
+
+  function hasAnyPrediction() {
+    return Boolean(
+      Object.keys(state.knockoutPicks).length ||
+        Object.keys(state.matchPredictions).length ||
+        JSON.stringify(state.groups) !== JSON.stringify(initialGroups) ||
+        JSON.stringify(state.thirdQualifiers) !== JSON.stringify(defaultThirdQualifiers())
+    );
+  }
+
+  function hasAnyResults() {
+    return getLiveFixtures().some((match) => Boolean(match.result));
+  }
+
+  function serializeSubmission() {
+    const bracketScore = calculateBracketScore();
+    const matchScore = calculateMatchScore();
+    return {
+      user: state.user,
+      groups: state.groups,
+      thirdQualifiers: state.thirdQualifiers,
+      knockoutPicks: state.knockoutPicks,
+      matchPredictions: state.matchPredictions,
+      bracketScore,
+      matchScore,
+      totalScore: bracketScore + matchScore,
+      hasPredictions: hasAnyPrediction(),
+      hasResults: hasAnyResults(),
+    };
+  }
+
+  function exportSpreadsheet() {
+    if (API_ENABLED) {
+      window.location.href = `${API_BASE}/api/export`;
+      return;
+    }
+    const csv = buildLocalCsv();
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = el("a");
+    link.href = url;
+    link.download = "world-cup-predictor-data.csv";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function buildLocalCsv() {
+    const submission = serializeSubmission();
+    const row = [
+      new Date().toISOString(),
+      submission.user?.username || "",
+      submission.user?.email || "",
+      submission.hasPredictions,
+      submission.hasResults,
+      submission.bracketScore,
+      submission.matchScore,
+      submission.totalScore,
+      JSON.stringify(submission.groups),
+      JSON.stringify(submission.thirdQualifiers),
+      JSON.stringify(submission.knockoutPicks),
+      JSON.stringify(submission.matchPredictions),
+    ];
+    return [
+      [
+        "saved_at",
+        "username",
+        "email",
+        "has_predictions",
+        "has_results",
+        "bracket_score",
+        "match_score",
+        "total_score",
+        "groups_json",
+        "third_qualifiers_json",
+        "knockout_picks_json",
+        "match_predictions_json",
+      ].join(","),
+      row.map(csvEscape).join(","),
+    ].join("\n");
+  }
+
+  function loadState() {
+    const saved = localStorage.getItem(SAVE_KEY);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return {
+          groups: parsed.groups || cloneGroups(initialGroups),
+          thirdQualifiers: parsed.thirdQualifiers || defaultThirdQualifiers(),
+          knockoutPicks: parsed.knockoutPicks || {},
+          matchPredictions: parsed.matchPredictions || {},
+          user: parsed.user || null,
+        };
+      } catch (error) {
+        console.warn("Could not parse saved predictor state", error);
+      }
+    }
+    return {
+      groups: cloneGroups(initialGroups),
+      thirdQualifiers: defaultThirdQualifiers(),
+      knockoutPicks: {},
+      matchPredictions: {},
+      user: null,
+    };
+  }
+
+  function flashSave(message) {
+    dom.saveStatus.textContent = message;
+    window.clearTimeout(flashSave.timer);
+    flashSave.timer = window.setTimeout(() => {
+      dom.saveStatus.textContent = "Local save ready";
+    }, 1400);
+  }
+
+  function isBracketLocked() {
+    return Date.now() >= TOURNAMENT_START.getTime();
+  }
+
+  function defaultThirdQualifiers() {
+    return Object.keys(initialGroups).slice(0, 8);
+  }
+
+  function cloneGroups(groups) {
+    return JSON.parse(JSON.stringify(groups));
+  }
+
+  function team(code, name) {
+    return { code, name };
+  }
+
+  function buildSeededFixtures() {
+    const groupFixtures = buildGroupFixtures();
+    const knockoutFixtures = buildKnockoutFixtures(groupFixtures.length + 1);
+    return [...groupFixtures, ...knockoutFixtures];
+  }
+
+  function buildGroupFixtures() {
+    const pairings = {
+      "group-1": [
+        [0, 1],
+        [2, 3],
+      ],
+      "group-2": [
+        [0, 2],
+        [3, 1],
+      ],
+      "group-3": [
+        [3, 0],
+        [1, 2],
+      ],
+    };
+    const dates = {
+      "group-1": {
+        A: "2026-06-11",
+        B: "2026-06-12",
+        C: "2026-06-13",
+        D: "2026-06-13",
+        E: "2026-06-14",
+        F: "2026-06-14",
+        G: "2026-06-15",
+        H: "2026-06-15",
+        I: "2026-06-16",
+        J: "2026-06-16",
+        K: "2026-06-17",
+        L: "2026-06-17",
+      },
+      "group-2": {
+        A: "2026-06-18",
+        B: "2026-06-18",
+        C: "2026-06-19",
+        D: "2026-06-19",
+        E: "2026-06-20",
+        F: "2026-06-20",
+        G: "2026-06-21",
+        H: "2026-06-21",
+        I: "2026-06-22",
+        J: "2026-06-22",
+        K: "2026-06-23",
+        L: "2026-06-23",
+      },
+      "group-3": {
+        A: "2026-06-24",
+        B: "2026-06-24",
+        C: "2026-06-24",
+        D: "2026-06-25",
+        E: "2026-06-25",
+        F: "2026-06-25",
+        G: "2026-06-26",
+        H: "2026-06-26",
+        I: "2026-06-26",
+        J: "2026-06-27",
+        K: "2026-06-27",
+        L: "2026-06-27",
+      },
+    };
+    const fixtures = [];
+    let id = 1;
+    Object.keys(pairings).forEach((round) => {
+      Object.entries(initialGroups).forEach(([group, teams]) => {
+        pairings[round].forEach(([homeIndex, awayIndex], pairIndex) => {
+          const isOpener = id === 1;
+          const iso = `${dates[round][group]}T${isOpener ? "12:00:00-06:00" : pairIndex === 0 ? "13:00:00-04:00" : "18:00:00-04:00"}`;
+          fixtures.push(
+            fx(
+              `M${id}`,
+              iso,
+              round,
+              `Group ${group}`,
+              venues[(id - 1) % venues.length],
+              teams[homeIndex].name,
+              teams[awayIndex].name
+            )
+          );
+          id += 1;
+        });
+      });
+    });
+    return fixtures;
+  }
+
+  function buildKnockoutFixtures(startId) {
+    const rounds = [
+      ["round-32", "Round of 32", "2026-06-28", 16],
+      ["round-16", "Round of 16", "2026-07-04", 8],
+      ["quarter", "Quarter-final", "2026-07-09", 4],
+      ["semi", "Semi-final", "2026-07-14", 2],
+    ];
+    const fixtures = [];
+    let id = startId;
+    rounds.forEach(([round, label, startDate, count]) => {
+      for (let index = 0; index < count; index += 1) {
+        const date = addDays(startDate, Math.floor(index / 4));
+        fixtures.push(
+          fx(
+            `M${id}`,
+            `${date}T${index % 2 === 0 ? "15:00:00-04:00" : "20:00:00-04:00"}`,
+            round,
+            label,
+            venues[(id - 1) % venues.length],
+            "TBD",
+            "TBD"
+          )
+        );
+        id += 1;
+      }
+    });
+    fixtures.push(
+      fx(`M${id}`, "2026-07-18T17:00:00-04:00", "third", "Third-place", "Miami Stadium", "Semi-final loser", "Semi-final loser")
+    );
+    fixtures.push(
+      fx(`M${id + 1}`, "2026-07-19T15:00:00-04:00", "final", "Grand final", "New York New Jersey Stadium", "Finalist", "Finalist")
+    );
+    return fixtures;
+  }
+
+  function addDays(dateString, days) {
+    const date = new Date(`${dateString}T00:00:00Z`);
+    date.setUTCDate(date.getUTCDate() + days);
+    return date.toISOString().slice(0, 10);
+  }
+
+  function fx(id, iso, round, label, venue, home, away) {
+    return { id, kickoff: new Date(iso).getTime(), round, label, venue, home, away, result: null };
+  }
+
+  function ko(id, home, away) {
+    return { id, teams: [home, away] };
+  }
+
+  function scoreInput(value, enabled) {
+    const input = el("input");
+    input.type = "number";
+    input.min = "0";
+    input.max = "30";
+    input.placeholder = "0";
+    input.value = value || "";
+    input.disabled = !enabled;
+    return input;
+  }
+
+  function formatDate(timestamp) {
+    return new Intl.DateTimeFormat(undefined, {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(new Date(timestamp));
+  }
+
+  function el(tag, className) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    return node;
+  }
+
+  function textEl(tag, className, text) {
+    const node = el(tag, className);
+    node.textContent = text;
+    return node;
+  }
+
+  function compact(items) {
+    return items.filter(Boolean);
+  }
+
+  function escapeHtml(value) {
+    return String(value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+
+  function csvEscape(value) {
+    const text = String(value ?? "");
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+})();
