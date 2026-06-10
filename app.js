@@ -271,6 +271,9 @@
       });
       if (error) throw error;
       if (!data.user) throw new Error("Check your email to finish signup.");
+      if (!data.session) {
+        throw new Error("Check your email to confirm signup, then log in.");
+      }
       await ensureProfile(data.user, payload.username);
       await loadRemotePredictions(data.user.id);
       return userFromAuth(data.user, payload.username);
@@ -333,8 +336,16 @@
       email: authUser.email,
       avatar_url: authUser.user_metadata?.avatar_url || "",
     };
-    const { data, error } = await supabaseClient.from("profiles").insert(profile).select().single();
-    if (error) throw error;
+    const { data, error } = await supabaseClient.from("profiles").upsert(profile, { onConflict: "id" }).select().single();
+    if (error) {
+      const { data: retry } = await supabaseClient
+        .from("profiles")
+        .select("id, username, display_name, email, avatar_url")
+        .eq("id", authUser.id)
+        .maybeSingle();
+      if (retry) return retry;
+      throw error;
+    }
     return data;
   }
 
