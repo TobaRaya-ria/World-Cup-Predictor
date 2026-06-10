@@ -5,6 +5,7 @@
   const SAVE_KEY = "wc26-predictor-v2";
   const API_ENABLED = location.protocol === "http:" || location.protocol === "https:";
   const API_BASE = API_ENABLED ? location.origin : "";
+  const LOCAL_API_ENABLED = API_ENABLED && ["127.0.0.1", "localhost"].includes(location.hostname);
 
   const initialGroups = {
     A: [
@@ -77,12 +78,21 @@
   const state = loadState();
   const dom = {};
   let authMode = "login";
+  let supabaseClient = null;
+  let supabaseReady = false;
+  let liveFixtures = [];
+  let fixtureIdByMatchId = {};
+  let remoteLeaderboard = [];
 
-  document.addEventListener("DOMContentLoaded", init);
+  document.addEventListener("DOMContentLoaded", () => {
+    init();
+  });
 
-  function init() {
+  async function init() {
     cacheDom();
     bindEvents();
+    refreshAll();
+    await initializeSupabase();
     refreshAll();
     setInterval(renderMatches, 60000);
   }
@@ -165,14 +175,40 @@
     });
 
     dom.googleMock.addEventListener("click", async () => {
-      const username = dom.usernameInput.value.trim() || "Google Predictor";
-      await authenticate("signup", {
-        username,
-        email: dom.emailInput.value.trim() || "google-user@example.com",
-        password: "google-demo-login",
-        provider: "google",
-      });
+      await signInWithGoogle();
     });
+  }
+
+  async function initializeSupabase() {
+    if (!API_ENABLED || !window.supabase) {
+      flashSave(LOCAL_API_ENABLED ? "Local mode" : "Supabase unavailable");
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE}/api/config`);
+      if (!response.ok) throw new Error("Supabase config missing");
+      const config = await response.json();
+      if (!config.supabaseUrl || !config.supabaseAnonKey) throw new Error("Supabase env vars missing");
+
+      supabaseClient = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey);
+      supabaseReady = true;
+      await hydrateSupabaseSession();
+      await loadFixturesFromSupabase();
+      await loadLeaderboardFromSupabase();
+      flashSave("Supabase connected");
+    } catch (error) {
+      supabaseReady = false;
+      flashSave(LOCAL_API_ENABLED ? "Local CSV mode" : error.message);
+    }
+  }
+
+  async function hydrateSupabaseSession() {
+    if (!supabaseReady) return;
+    const { data, error } = await supabaseClient.auth.getSession();
+    if (error || !data.session?.user) return;
+    await setUserFromSupabase(data.session.user);
+    await loadRemotePredictions(data.session.user.id);
   }
 
   function setAuthMode(mode) {
@@ -203,15 +239,13 @@
     }
 
     try {
-      if (API_ENABLED) {
+      if (supabaseReady) {
+        state.user = await authenticateWithSupabase(mode, payload);
+      } else if (LOCAL_API_ENABLED) {
         const response = await apiPost(`/api/${mode}`, payload);
         state.user = response.user;
       } else {
-        state.user = {
-          username: payload.username || payload.email.split("@")[0],
-          email: payload.email,
-          provider: payload.provider || "email",
-        };
+        throw new Error("Supabase is not configured for this deployment.");
       }
       await persist();
       dom.authDialog.close();
@@ -219,6 +253,46 @@
     } catch (error) {
       flashSave(error.message || "Login failed");
     }
+  }
+
+  async function authenticateWithSupabase(mode, payload) {
+    const email = payload.email.trim();
+    const password = payload.password;
+    if (mode === "signup") {
+      const { data, error } = await supabaseClient.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            username: payload.username,
+            display_name: payload.username,
+          },
+        },
+      });
+      if (error) throw error;
+      if (!data.user) throw new Error("Check your email to finish signup.");
+      await ensureProfile(data.user, payload.username);
+      await loadRemotePredictions(data.user.id);
+      return userFromAuth(data.user, payload.username);
+    }
+
+    const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    await setUserFromSupabase(data.user);
+    await loadRemotePredictions(data.user.id);
+    return state.user;
+  }
+
+  async function signInWithGoogle() {
+    if (!supabaseReady) {
+      flashSave("Supabase is not configured");
+      return;
+    }
+    const { error } = await supabaseClient.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: location.origin },
+    });
+    if (error) flashSave(error.message);
   }
 
   async function apiPost(path, payload) {
@@ -230,6 +304,101 @@
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || "Request failed");
     return data;
+  }
+
+  async function setUserFromSupabase(authUser) {
+    const profile = await ensureProfile(authUser, authUser.user_metadata?.username || authUser.email?.split("@")[0]);
+    state.user = {
+      id: authUser.id,
+      username: profile.username,
+      email: profile.email || authUser.email,
+      provider: "supabase",
+    };
+  }
+
+  async function ensureProfile(authUser, preferredUsername) {
+    const fallbackUsername = preferredUsername || authUser.email?.split("@")[0] || "Predictor";
+    const { data: existing, error: selectError } = await supabaseClient
+      .from("profiles")
+      .select("id, username, display_name, email, avatar_url")
+      .eq("id", authUser.id)
+      .maybeSingle();
+    if (selectError) throw selectError;
+    if (existing) return existing;
+
+    const profile = {
+      id: authUser.id,
+      username: fallbackUsername,
+      display_name: fallbackUsername,
+      email: authUser.email,
+      avatar_url: authUser.user_metadata?.avatar_url || "",
+    };
+    const { data, error } = await supabaseClient.from("profiles").insert(profile).select().single();
+    if (error) throw error;
+    return data;
+  }
+
+  function userFromAuth(authUser, username) {
+    return {
+      id: authUser.id,
+      username: username || authUser.user_metadata?.username || authUser.email?.split("@")[0],
+      email: authUser.email,
+      provider: "supabase",
+    };
+  }
+
+  async function loadRemotePredictions(userId) {
+    const { data: tournamentPrediction } = await supabaseClient
+      .from("tournament_predictions")
+      .select("group_rankings, third_place_qualifiers, knockout_picks")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (tournamentPrediction) {
+      state.groups = tournamentPrediction.group_rankings || state.groups;
+      state.thirdQualifiers = tournamentPrediction.third_place_qualifiers || state.thirdQualifiers;
+      state.knockoutPicks = tournamentPrediction.knockout_picks || state.knockoutPicks;
+    }
+
+    const { data: matchPredictions } = await supabaseClient
+      .from("match_predictions")
+      .select("fixture_id, predicted_home_score, predicted_away_score, predicted_outcome, fixtures(fifa_match_id)")
+      .eq("user_id", userId);
+
+    if (matchPredictions?.length) {
+      state.matchPredictions = {};
+      matchPredictions.forEach((prediction) => {
+        const matchId = prediction.fixtures?.fifa_match_id;
+        if (!matchId) return;
+        state.matchPredictions[matchId] = {
+          home: String(prediction.predicted_home_score),
+          away: String(prediction.predicted_away_score),
+          outcome: titleCase(prediction.predicted_outcome),
+        };
+      });
+    }
+    localStorage.setItem(SAVE_KEY, JSON.stringify(state));
+  }
+
+  async function loadFixturesFromSupabase() {
+    const { data, error } = await supabaseClient
+      .from("fixtures")
+      .select("id, fifa_match_id, round, group_code, home_team, away_team, kickoff_at, venue, status, home_score, away_score, winner_team")
+      .order("kickoff_at", { ascending: true });
+    if (error) throw error;
+    if (!data?.length) return;
+    liveFixtures = data.map(toAppFixture);
+    fixtureIdByMatchId = Object.fromEntries(liveFixtures.map((fixture) => [fixture.id, fixture.fixtureId]));
+  }
+
+  async function loadLeaderboardFromSupabase() {
+    if (!supabaseReady) return;
+    const { data } = await supabaseClient
+      .from("leaderboard")
+      .select("user_id, username, total_score, bracket_score, match_score, rank")
+      .order("rank", { ascending: true })
+      .limit(25);
+    remoteLeaderboard = data || [];
   }
 
   function switchTab(tab) {
@@ -467,11 +636,18 @@
       return;
     }
 
-    const rows = [{ username: state.user.username, points: total, current: true }];
+    const rows = remoteLeaderboard.length
+      ? remoteLeaderboard.map((row) => ({
+          username: row.username,
+          points: Number(row.total_score || 0),
+          rank: row.rank,
+          current: row.user_id === state.user?.id,
+        }))
+      : [{ username: state.user.username, points: total, current: true }];
     rows.forEach((row, index) => {
       const item = el("div", `leaderboard-row${row.current ? " current" : ""}`);
       item.innerHTML = `
-        <strong>#${index + 1}</strong>
+        <strong>#${row.rank || index + 1}</strong>
         <span>${escapeHtml(row.username)}</span>
         <strong>${row.points.toFixed(1)}</strong>
       `;
@@ -682,12 +858,19 @@
   }
 
   function getLiveFixtures() {
-    return seededFixtures.map((match) => ({ ...match }));
+    return (liveFixtures.length ? liveFixtures : seededFixtures).map((match) => ({ ...match }));
   }
 
   async function persist() {
     localStorage.setItem(SAVE_KEY, JSON.stringify(state));
-    if (API_ENABLED && state.user) {
+    if (supabaseReady && state.user?.id) {
+      try {
+        await saveToSupabase();
+      } catch (error) {
+        flashSave(error.message || "Supabase save failed");
+        return;
+      }
+    } else if (LOCAL_API_ENABLED && state.user) {
       try {
         await apiPost("/api/save", serializeSubmission());
       } catch (error) {
@@ -696,6 +879,80 @@
       }
     }
     flashSave("Saved");
+  }
+
+  async function saveToSupabase() {
+    await saveTournamentPrediction();
+    await saveMatchPredictions();
+    await saveScoreSnapshot();
+    await loadLeaderboardFromSupabase();
+  }
+
+  async function saveTournamentPrediction() {
+    const payload = {
+      user_id: state.user.id,
+      group_rankings: state.groups,
+      third_place_qualifiers: state.thirdQualifiers,
+      knockout_picks: state.knockoutPicks,
+      final_placements: calculatePlacements(),
+      locked_at: isBracketLocked() ? new Date(TOURNAMENT_START).toISOString() : null,
+      updated_at: new Date().toISOString(),
+    };
+
+    const { data: existing, error: selectError } = await supabaseClient
+      .from("tournament_predictions")
+      .select("id")
+      .eq("user_id", state.user.id)
+      .maybeSingle();
+    if (selectError) throw selectError;
+
+    const result = existing
+      ? await supabaseClient.from("tournament_predictions").update(payload).eq("id", existing.id)
+      : await supabaseClient.from("tournament_predictions").insert({ ...payload, submitted_at: new Date().toISOString() });
+    if (result.error) throw result.error;
+  }
+
+  async function saveMatchPredictions() {
+    const entries = Object.entries(state.matchPredictions)
+      .map(([matchId, prediction]) => {
+        const fixtureId = fixtureIdByMatchId[matchId];
+        if (!fixtureId || prediction.home === "" || prediction.away === "") return null;
+        const fixture = getLiveFixtures().find((match) => match.id === matchId);
+        return {
+          user_id: state.user.id,
+          fixture_id: fixtureId,
+          predicted_home_score: Number(prediction.home),
+          predicted_away_score: Number(prediction.away),
+          predicted_outcome: String(prediction.outcome || "").toLowerCase(),
+          locked_at: fixture ? new Date(fixture.kickoff).toISOString() : null,
+          updated_at: new Date().toISOString(),
+        };
+      })
+      .filter(Boolean);
+
+    if (!entries.length) return;
+    const { error } = await supabaseClient.from("match_predictions").upsert(entries, {
+      onConflict: "user_id,fixture_id",
+    });
+    if (error) throw error;
+  }
+
+  async function saveScoreSnapshot() {
+    const bracketScore = calculateBracketScore();
+    const matchScore = calculateMatchScore();
+    const payload = {
+      user_id: state.user.id,
+      bracket_score: bracketScore,
+      match_score: matchScore,
+      total_score: bracketScore + matchScore,
+      exact_scores_count: 0,
+      correct_results_count: 0,
+      updated_at: new Date().toISOString(),
+    };
+    const { error } = await supabaseClient.from("scores").upsert(payload, {
+      onConflict: "user_id",
+    });
+    if (error) throw error;
   }
 
   function hasAnyPrediction() {
@@ -729,7 +986,7 @@
   }
 
   function exportSpreadsheet() {
-    if (API_ENABLED) {
+    if (LOCAL_API_ENABLED && !supabaseReady) {
       window.location.href = `${API_BASE}/api/export`;
       return;
     }
@@ -964,6 +1221,56 @@
     return { id, kickoff: new Date(iso).getTime(), round, label, venue, home, away, result: null };
   }
 
+  function toAppFixture(row) {
+    const round = normalizeRound(row.round);
+    const hasScore = row.home_score !== null && row.home_score !== "" && row.away_score !== null && row.away_score !== "";
+    return {
+      id: row.fifa_match_id,
+      fixtureId: row.id,
+      kickoff: new Date(row.kickoff_at).getTime(),
+      round,
+      label: labelForRound(round, row.group_code),
+      venue: row.venue || "TBD",
+      home: row.home_team,
+      away: row.away_team,
+      result: hasScore
+        ? {
+            home: Number(row.home_score),
+            away: Number(row.away_score),
+            winner: row.winner_team || "",
+          }
+        : null,
+    };
+  }
+
+  function normalizeRound(round) {
+    const mapping = {
+      group_1: "group-1",
+      group_2: "group-2",
+      group_3: "group-3",
+      round_32: "round-32",
+      round_16: "round-16",
+      quarter_final: "quarter",
+      semi_final: "semi",
+      third_place: "third",
+      final: "final",
+    };
+    return mapping[round] || round;
+  }
+
+  function labelForRound(round, groupCode) {
+    if (round.startsWith("group")) return `Group ${groupCode || ""}`.trim();
+    const labels = {
+      "round-32": "Round of 32",
+      "round-16": "Round of 16",
+      quarter: "Quarter-final",
+      semi: "Semi-final",
+      third: "Third-place",
+      final: "Grand final",
+    };
+    return labels[round] || round;
+  }
+
   function ko(id, home, away) {
     return { id, teams: [home, away] };
   }
@@ -1017,5 +1324,10 @@
   function csvEscape(value) {
     const text = String(value ?? "");
     return `"${text.replace(/"/g, '""')}"`;
+  }
+
+  function titleCase(value) {
+    if (!value) return "";
+    return String(value).charAt(0).toUpperCase() + String(value).slice(1).toLowerCase();
   }
 })();

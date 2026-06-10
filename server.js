@@ -46,6 +46,12 @@ const server = http.createServer(async (request, response) => {
     if (request.url === "/api/health" && request.method === "GET") {
       return sendJson(response, 200, { ok: true });
     }
+    if (request.url === "/api/config" && request.method === "GET") {
+      return sendJson(response, 200, {
+        supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL || "",
+        supabaseAnonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "",
+      });
+    }
     return serveStatic(request, response);
   } catch (error) {
     return sendJson(response, 500, { error: error.message || "Server error" });
