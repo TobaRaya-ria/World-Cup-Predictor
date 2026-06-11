@@ -261,11 +261,18 @@
     const email = authEmailForUsername(username);
     const password = payload.password;
     if (mode === "signup") {
-      await createConfirmedSupabaseUser(username, password);
+      const createdUser = await createConfirmedSupabaseUser(username, password);
       const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
       if (error) throw error;
       if (!data.user) throw new Error("Signup failed. Please try again.");
-      const profile = await ensureProfile(data.user, username);
+      const profile =
+        createdUser?.profile || (await getProfile(data.user.id)) || {
+          id: data.user.id,
+          username,
+          display_name: username,
+          email: "",
+          avatar_url: "",
+        };
       await loadRemotePredictions(data.user.id);
       return userFromProfile(data.user, profile);
     }
@@ -322,39 +329,39 @@
     const fallbackUsername =
       normalizeUsername(preferredUsername) || normalizeUsername(usernameFromAuthEmail(authUser.email)) || `predictor_${authUser.id.slice(0, 8)}`;
     const publicEmail = isInternalAuthEmail(authUser.email) ? null : authUser.email;
-    const { data: existing, error: selectError } = await supabaseClient
-      .from("profiles")
-      .select("id, username, display_name, email, avatar_url")
-      .eq("id", authUser.id)
-      .maybeSingle();
-    if (selectError) throw selectError;
-    if (existing) {
-      if (isInternalAuthEmail(existing.email)) {
-        const { data, error } = await supabaseClient
-          .from("profiles")
-          .update({ email: null })
-          .eq("id", authUser.id)
-          .select("id, username, display_name, email, avatar_url")
-          .single();
-        if (error) throw error;
-        return data;
-      }
-      return existing;
+    const existing = await getProfile(authUser.id);
+    if (existing) return existing;
+
+    if (isInternalAuthEmail(authUser.email)) {
+      throw new Error("Profile was not created. Run the Supabase trigger fix, then sign up again.");
     }
 
-    const profile = {
+    return createOwnProfile({
       id: authUser.id,
       username: fallbackUsername,
       display_name: fallbackUsername,
       email: publicEmail,
       avatar_url: authUser.user_metadata?.avatar_url || "",
-    };
+    });
+  }
+
+  async function getProfile(userId) {
+    const { data: existing, error: selectError } = await supabaseClient
+      .from("profiles")
+      .select("id, username, display_name, email, avatar_url")
+      .eq("id", userId)
+      .maybeSingle();
+    if (selectError) throw selectError;
+    return existing;
+  }
+
+  async function createOwnProfile(profile) {
     const { data, error } = await supabaseClient.from("profiles").upsert(profile, { onConflict: "id" }).select().single();
     if (error) {
       const { data: retry } = await supabaseClient
         .from("profiles")
         .select("id, username, display_name, email, avatar_url")
-        .eq("id", authUser.id)
+        .eq("id", profile.id)
         .maybeSingle();
       if (retry) return retry;
       throw error;

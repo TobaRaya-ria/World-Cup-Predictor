@@ -15,6 +15,7 @@ returns trigger
 language plpgsql
 security definer
 set search_path = public
+set row_security = off
 as $$
 begin
   insert into public.profiles (id, username, display_name, email, avatar_url)
@@ -32,6 +33,8 @@ begin
   return new;
 end;
 $$;
+
+alter function public.handle_new_user() owner to postgres;
 
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created

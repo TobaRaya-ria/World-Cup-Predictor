@@ -102,13 +102,14 @@ async function handleSupabaseSignup(request, response) {
   }
 
   try {
-    const user = await createSupabaseUser(username, password);
+    const { user, profile } = await createSupabaseUser(username, password);
     return sendJson(response, 200, {
       user: {
         id: user.id,
         username,
         email: "",
         provider: "supabase",
+        profile,
       },
     });
   } catch (error) {
@@ -341,8 +342,8 @@ async function createSupabaseUser(username, password) {
     throw error;
   }
 
-  await upsertSupabaseProfile(supabaseUrl, serviceRoleKey, user.id, username);
-  return user;
+  const profile = await upsertSupabaseProfile(supabaseUrl, serviceRoleKey, user.id, username);
+  return { user, profile };
 }
 
 async function assertSupabaseUsernameAvailable(supabaseUrl, serviceRoleKey, username) {
@@ -376,7 +377,7 @@ async function upsertSupabaseProfile(supabaseUrl, serviceRoleKey, userId, userna
       apikey: serviceRoleKey,
       Authorization: `Bearer ${serviceRoleKey}`,
       "Content-Type": "application/json",
-      Prefer: "resolution=merge-duplicates",
+      Prefer: "resolution=merge-duplicates,return=representation",
     },
     body: JSON.stringify({
       id: userId,
@@ -392,6 +393,14 @@ async function upsertSupabaseProfile(supabaseUrl, serviceRoleKey, userId, userna
     error.status = response.status;
     throw error;
   }
+  const rows = await response.json().catch(() => []);
+  return rows[0] || {
+    id: userId,
+    username,
+    display_name: username,
+    email: null,
+    avatar_url: "",
+  };
 }
 
 function normalizeSupabaseError(body) {
