@@ -153,6 +153,9 @@
     </dialog>
 
     <script src="vendor/supabase-js.js"></script>
+    <script>
+      if (!window.supabase && typeof supabase !== "undefined") window.supabase = supabase;
+    </script>
     <script src="app.js"></script>
   </body>
 </html>
