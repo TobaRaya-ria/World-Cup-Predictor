@@ -56,6 +56,7 @@ const server = http.createServer(async (request, response) => {
       return sendJson(response, 200, {
         supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL || "",
         supabaseAnonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "",
+        hasServiceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
       });
     }
     return serveStatic(request, response);

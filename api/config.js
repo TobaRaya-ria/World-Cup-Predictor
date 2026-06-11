@@ -3,5 +3,6 @@ module.exports = function handler(request, response) {
   response.status(200).json({
     supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL || "",
     supabaseAnonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "",
+    hasServiceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
   });
 };

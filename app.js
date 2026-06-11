@@ -81,6 +81,8 @@
   let authMode = "login";
   let supabaseClient = null;
   let supabaseReady = false;
+  let supabaseInitPromise = null;
+  let supabaseInitError = "";
   let liveFixtures = [];
   let fixtureIdByMatchId = {};
   let remoteLeaderboard = [];
@@ -93,7 +95,8 @@
     cacheDom();
     bindEvents();
     refreshAll();
-    await initializeSupabase();
+    supabaseInitPromise = initializeSupabase();
+    await supabaseInitPromise;
     refreshAll();
     setInterval(renderMatches, 60000);
   }
@@ -180,18 +183,28 @@
   }
 
   async function initializeSupabase() {
-    if (!API_ENABLED || !window.supabase) {
-      flashSave(LOCAL_API_ENABLED ? "Local mode" : "Supabase unavailable");
+    supabaseInitError = "";
+    const supabaseApi = window.supabase || globalThis.supabase;
+    if (!API_ENABLED) {
+      supabaseInitError = "Open the site through http, not as a file.";
+      flashSave("Local file mode");
+      return;
+    }
+    if (!supabaseApi?.createClient) {
+      supabaseInitError = "Supabase client script did not load.";
+      flashSave(LOCAL_API_ENABLED ? "Local CSV mode" : supabaseInitError);
       return;
     }
 
     try {
       const response = await fetch(`${API_BASE}/api/config`);
-      if (!response.ok) throw new Error("Supabase config missing");
+      if (!response.ok) throw new Error(`/api/config returned ${response.status}`);
       const config = await response.json();
-      if (!config.supabaseUrl || !config.supabaseAnonKey) throw new Error("Supabase env vars missing");
+      if (!config.supabaseUrl || !config.supabaseAnonKey) {
+        throw new Error("Supabase env vars are missing from /api/config.");
+      }
 
-      supabaseClient = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey);
+      supabaseClient = supabaseApi.createClient(config.supabaseUrl, config.supabaseAnonKey);
       supabaseReady = true;
       await hydrateSupabaseSession();
       await loadFixturesFromSupabase();
@@ -199,6 +212,7 @@
       flashSave("Supabase connected");
     } catch (error) {
       supabaseReady = false;
+      supabaseInitError = error.message || "Supabase setup failed.";
       flashSave(LOCAL_API_ENABLED ? "Local CSV mode" : error.message);
     }
   }
@@ -240,13 +254,16 @@
     payload.username = username;
 
     try {
+      if (!supabaseReady && supabaseInitPromise) {
+        await supabaseInitPromise;
+      }
       if (supabaseReady) {
         state.user = await authenticateWithSupabase(mode, payload);
       } else if (LOCAL_API_ENABLED) {
         const response = await apiPost(`/api/${mode}`, payload);
         state.user = response.user;
       } else {
-        throw new Error("Supabase is not configured for this deployment.");
+        throw new Error(supabaseInitError || "Supabase is not configured for this deployment.");
       }
       await persist();
       dom.authDialog.close();
