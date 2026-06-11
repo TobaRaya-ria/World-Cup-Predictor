@@ -3,6 +3,8 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 
+loadEnvFile(path.join(__dirname, ".env"));
+
 const PORT = Number(process.env.PORT || 5186);
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, "data");
@@ -396,4 +398,19 @@ function normalizeSupabaseError(body) {
   const message = String(body.msg || body.message || body.error_description || body.error || "Signup failed");
   if (/already|registered|duplicate|unique/i.test(message)) return "That username is already taken.";
   return message;
+}
+
+function loadEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return;
+  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) return;
+    const separatorIndex = trimmed.indexOf("=");
+    if (separatorIndex <= 0) return;
+    const key = trimmed.slice(0, separatorIndex).trim();
+    const rawValue = trimmed.slice(separatorIndex + 1).trim();
+    if (process.env[key]) return;
+    process.env[key] = rawValue.replace(/^["']|["']$/g, "");
+  });
 }
