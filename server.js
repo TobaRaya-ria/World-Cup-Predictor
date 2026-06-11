@@ -43,6 +43,9 @@ const server = http.createServer(async (request, response) => {
     if (request.url === "/api/supabase-profile" && request.method === "POST") {
       return handleSupabaseProfile(request, response);
     }
+    if (request.url === "/api/supabase-save" && request.method === "POST") {
+      return handleSupabaseSave(request, response);
+    }
     if (request.url === "/api/login" && request.method === "POST") {
       return handleLogin(request, response);
     }
@@ -118,6 +121,16 @@ async function handleSupabaseSignup(request, response) {
     });
   } catch (error) {
     return sendJson(response, error.status || 500, { error: error.message || "Signup failed" });
+  }
+}
+
+async function handleSupabaseSave(request, response) {
+  const body = await readJson(request);
+  try {
+    const result = await saveSupabaseSubmission(body);
+    return sendJson(response, 200, result);
+  } catch (error) {
+    return sendJson(response, error.status || 500, { error: error.message || "Supabase save failed." });
   }
 }
 
@@ -379,6 +392,124 @@ async function repairSupabaseProfile(userId, username) {
     throw error;
   }
   return upsertSupabaseProfile(supabaseUrl, serviceRoleKey, userId, username);
+}
+
+async function saveSupabaseSubmission(submission) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+  if (!supabaseUrl || !serviceRoleKey) {
+    const error = new Error("Supabase service role key is missing on the server.");
+    error.status = 500;
+    throw error;
+  }
+
+  const user = submission.user || {};
+  const userId = String(user.id || "").trim();
+  const username = normalizeUsername(user.username);
+  if (!isUuid(userId) || !isValidUsername(username)) {
+    const error = new Error("Log in with a Supabase account before saving.");
+    error.status = 400;
+    throw error;
+  }
+
+  await upsertSupabaseProfile(supabaseUrl, serviceRoleKey, userId, username);
+  await upsertTournamentPrediction(supabaseUrl, serviceRoleKey, userId, submission);
+  const matchCount = await upsertMatchPredictions(supabaseUrl, serviceRoleKey, userId, submission.matchPredictions || {});
+  await upsertScoreSnapshot(supabaseUrl, serviceRoleKey, userId, submission);
+  return { ok: true, matchCount };
+}
+
+async function upsertTournamentPrediction(supabaseUrl, serviceRoleKey, userId, submission) {
+  const response = await fetch(`${supabaseUrl}/rest/v1/tournament_predictions?on_conflict=user_id`, {
+    method: "POST",
+    headers: supabaseJsonHeaders(serviceRoleKey, "resolution=merge-duplicates"),
+    body: JSON.stringify({
+      user_id: userId,
+      group_rankings: submission.groups || {},
+      third_place_qualifiers: submission.thirdQualifiers || [],
+      knockout_picks: submission.knockoutPicks || {},
+      final_placements: submission.finalPlacements || {},
+      locked_at: submission.bracketFinalizedAt || null,
+      updated_at: new Date().toISOString(),
+    }),
+  });
+  await assertSupabaseOk(response);
+}
+
+async function upsertMatchPredictions(supabaseUrl, serviceRoleKey, userId, matchPredictions) {
+  const fixtureMap = await loadSupabaseFixtureMap(supabaseUrl, serviceRoleKey);
+  const entries = [];
+  Object.entries(matchPredictions).forEach(([matchId, prediction]) => {
+    if (prediction.home === "" || prediction.away === "") return;
+    const fixtureId = fixtureMap[matchId];
+    if (!fixtureId) {
+      if (prediction.finalizedAt) throw new Error(`Fixture ${matchId} is not synced to Supabase.`);
+      return;
+    }
+    entries.push({
+      user_id: userId,
+      fixture_id: fixtureId,
+      predicted_home_score: Number(prediction.home),
+      predicted_away_score: Number(prediction.away),
+      predicted_outcome: String(prediction.outcome || "").toLowerCase(),
+      locked_at: prediction.finalizedAt || null,
+      updated_at: new Date().toISOString(),
+    });
+  });
+  if (!entries.length) return 0;
+  const response = await fetch(`${supabaseUrl}/rest/v1/match_predictions?on_conflict=user_id,fixture_id`, {
+    method: "POST",
+    headers: supabaseJsonHeaders(serviceRoleKey, "resolution=merge-duplicates"),
+    body: JSON.stringify(entries),
+  });
+  await assertSupabaseOk(response);
+  return entries.length;
+}
+
+async function upsertScoreSnapshot(supabaseUrl, serviceRoleKey, userId, submission) {
+  const response = await fetch(`${supabaseUrl}/rest/v1/scores?on_conflict=user_id`, {
+    method: "POST",
+    headers: supabaseJsonHeaders(serviceRoleKey, "resolution=merge-duplicates"),
+    body: JSON.stringify({
+      user_id: userId,
+      bracket_score: Number(submission.bracketScore || 0),
+      match_score: Number(submission.matchScore || 0),
+      total_score: Number(submission.totalScore || 0),
+      exact_scores_count: 0,
+      correct_results_count: 0,
+      updated_at: new Date().toISOString(),
+    }),
+  });
+  await assertSupabaseOk(response);
+}
+
+async function loadSupabaseFixtureMap(supabaseUrl, serviceRoleKey) {
+  const response = await fetch(`${supabaseUrl}/rest/v1/fixtures?select=id,fifa_match_id`, {
+    headers: {
+      apikey: serviceRoleKey,
+      Authorization: `Bearer ${serviceRoleKey}`,
+    },
+  });
+  await assertSupabaseOk(response);
+  const fixtures = await response.json();
+  return Object.fromEntries(fixtures.map((fixture) => [fixture.fifa_match_id, fixture.id]));
+}
+
+function supabaseJsonHeaders(serviceRoleKey, prefer) {
+  return {
+    apikey: serviceRoleKey,
+    Authorization: `Bearer ${serviceRoleKey}`,
+    "Content-Type": "application/json",
+    Prefer: prefer,
+  };
+}
+
+async function assertSupabaseOk(response) {
+  if (response.ok) return;
+  const body = await response.json().catch(() => ({}));
+  const error = new Error(normalizeSupabaseError(body));
+  error.status = response.status;
+  throw error;
 }
 
 async function assertSupabaseUsernameAvailable(supabaseUrl, serviceRoleKey, username) {

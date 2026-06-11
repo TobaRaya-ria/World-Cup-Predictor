@@ -1030,7 +1030,8 @@
     persistLocalState();
     if (supabaseReady && state.user?.id) {
       try {
-        await saveToSupabase();
+        await apiPost("/api/supabase-save", serializeSubmission());
+        await loadLeaderboardFromSupabase();
       } catch (error) {
         flashSave(error.message || "Supabase save failed");
         return false;
@@ -1155,6 +1156,8 @@
       thirdQualifiers: state.thirdQualifiers,
       knockoutPicks: state.knockoutPicks,
       matchPredictions: state.matchPredictions,
+      finalPlacements: calculatePlacements(),
+      bracketFinalizedAt: state.bracketFinalizedAt || "",
       bracketScore,
       matchScore,
       totalScore: bracketScore + matchScore,
