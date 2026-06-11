@@ -425,7 +425,7 @@
 
     if (tournamentPrediction) {
       state.groups = tournamentPrediction.group_rankings || cloneGroups(initialGroups);
-      state.thirdQualifiers = tournamentPrediction.third_place_qualifiers || defaultThirdQualifiers();
+      state.thirdQualifiers = normalizeThirdQualifiers(tournamentPrediction.third_place_qualifiers || defaultThirdQualifiers());
       state.knockoutPicks = tournamentPrediction.knockout_picks || {};
     }
 
@@ -527,9 +527,7 @@
 
   function renderThirds() {
     const thirds = Object.entries(state.groups).map(([group, teams]) => ({ group, team: teams[2] }));
-    if (state.thirdQualifiers.length !== 8) {
-      state.thirdQualifiers = defaultThirdQualifiers();
-    }
+    state.thirdQualifiers = normalizeThirdQualifiers(state.thirdQualifiers);
     dom.thirdCounter.textContent = `${state.thirdQualifiers.length} / 8 selected`;
     dom.thirdPlaceGrid.innerHTML = "";
     thirds.forEach(({ group, team: item }) => {
@@ -1120,7 +1118,7 @@
         const parsed = JSON.parse(saved);
         return {
           groups: parsed.groups || cloneGroups(initialGroups),
-          thirdQualifiers: parsed.thirdQualifiers || defaultThirdQualifiers(),
+          thirdQualifiers: normalizeThirdQualifiers(parsed.thirdQualifiers || defaultThirdQualifiers()),
           knockoutPicks: parsed.knockoutPicks || {},
           matchPredictions: parsed.matchPredictions || {},
           user: parsed.user || null,
@@ -1154,6 +1152,12 @@
     return Object.keys(initialGroups).slice(0, 8);
   }
 
+  function normalizeThirdQualifiers(groups) {
+    const validGroups = Object.keys(initialGroups);
+    const unique = [...new Set(Array.isArray(groups) ? groups : [])].filter((group) => validGroups.includes(group));
+    return unique.slice(0, 8);
+  }
+
   function cloneGroups(groups) {
     return JSON.parse(JSON.stringify(groups));
   }
@@ -1172,7 +1176,7 @@
     try {
       const parsed = JSON.parse(saved);
       state.groups = parsed.groups || cloneGroups(initialGroups);
-      state.thirdQualifiers = parsed.thirdQualifiers || defaultThirdQualifiers();
+      state.thirdQualifiers = normalizeThirdQualifiers(parsed.thirdQualifiers || defaultThirdQualifiers());
       state.knockoutPicks = parsed.knockoutPicks || {};
       state.matchPredictions = parsed.matchPredictions || {};
     } catch (error) {
