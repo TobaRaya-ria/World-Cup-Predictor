@@ -8,6 +8,7 @@ const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, "data");
 const USERS_FILE = path.join(DATA_DIR, "world-cup-users.csv");
 const PREDICTIONS_FILE = path.join(DATA_DIR, "world-cup-predictor-data.csv");
+const INTERNAL_AUTH_DOMAIN = "worldcup-predictor.invalid";
 
 const userHeaders = ["created_at", "username", "email", "provider", "password_hash"];
 const predictionHeaders = [
@@ -33,6 +34,9 @@ const server = http.createServer(async (request, response) => {
   try {
     if (request.url === "/api/signup" && request.method === "POST") {
       return handleSignup(request, response);
+    }
+    if (request.url === "/api/supabase-signup" && request.method === "POST") {
+      return handleSupabaseSignup(request, response);
     }
     if (request.url === "/api/login" && request.method === "POST") {
       return handleLogin(request, response);
@@ -85,6 +89,29 @@ async function handleSignup(request, response) {
   });
   writeCsv(USERS_FILE, userHeaders, users);
   return sendJson(response, 200, { user: { username, email: "", provider } });
+}
+
+async function handleSupabaseSignup(request, response) {
+  const body = await readJson(request);
+  const username = normalizeUsername(body.username);
+  const password = String(body.password || "");
+  if (!isValidUsername(username) || password.length < 6) {
+    return sendJson(response, 400, { error: "Use a valid username and a 6+ character password." });
+  }
+
+  try {
+    const user = await createSupabaseUser(username, password);
+    return sendJson(response, 200, {
+      user: {
+        id: user.id,
+        username,
+        email: "",
+        provider: "supabase",
+      },
+    });
+  } catch (error) {
+    return sendJson(response, error.status || 500, { error: error.message || "Signup failed" });
+  }
 }
 
 async function handleLogin(request, response) {
@@ -268,6 +295,105 @@ function isValidUsername(username) {
   return /^[a-z0-9_]{3,24}$/.test(username);
 }
 
+function authEmailForUsername(username) {
+  return `${normalizeUsername(username)}@${INTERNAL_AUTH_DOMAIN}`;
+}
+
 function hashPassword(password) {
   return crypto.createHash("sha256").update(String(password)).digest("hex");
+}
+
+async function createSupabaseUser(username, password) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+  if (!supabaseUrl || !serviceRoleKey) {
+    const error = new Error("Supabase service role key is missing on the server.");
+    error.status = 500;
+    throw error;
+  }
+
+  const email = authEmailForUsername(username);
+  await assertSupabaseUsernameAvailable(supabaseUrl, serviceRoleKey, username);
+  const userResponse = await fetch(`${supabaseUrl}/auth/v1/admin/users`, {
+    method: "POST",
+    headers: {
+      apikey: serviceRoleKey,
+      Authorization: `Bearer ${serviceRoleKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      email,
+      password,
+      email_confirm: true,
+      user_metadata: {
+        username,
+        display_name: username,
+        auth_type: "username",
+      },
+    }),
+  });
+  const user = await userResponse.json().catch(() => ({}));
+  if (!userResponse.ok) {
+    const error = new Error(normalizeSupabaseError(user));
+    error.status = userResponse.status === 422 ? 409 : userResponse.status;
+    throw error;
+  }
+
+  await upsertSupabaseProfile(supabaseUrl, serviceRoleKey, user.id, username);
+  return user;
+}
+
+async function assertSupabaseUsernameAvailable(supabaseUrl, serviceRoleKey, username) {
+  const response = await fetch(
+    `${supabaseUrl}/rest/v1/profiles?select=id&username=eq.${encodeURIComponent(username)}&limit=1`,
+    {
+      headers: {
+        apikey: serviceRoleKey,
+        Authorization: `Bearer ${serviceRoleKey}`,
+      },
+    }
+  );
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    const error = new Error(normalizeSupabaseError(body));
+    error.status = response.status;
+    throw error;
+  }
+  const rows = await response.json().catch(() => []);
+  if (rows.length) {
+    const error = new Error("That username is already taken.");
+    error.status = 409;
+    throw error;
+  }
+}
+
+async function upsertSupabaseProfile(supabaseUrl, serviceRoleKey, userId, username) {
+  const response = await fetch(`${supabaseUrl}/rest/v1/profiles?on_conflict=id`, {
+    method: "POST",
+    headers: {
+      apikey: serviceRoleKey,
+      Authorization: `Bearer ${serviceRoleKey}`,
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates",
+    },
+    body: JSON.stringify({
+      id: userId,
+      username,
+      display_name: username,
+      email: null,
+      avatar_url: "",
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    const error = new Error(normalizeSupabaseError(body));
+    error.status = response.status;
+    throw error;
+  }
+}
+
+function normalizeSupabaseError(body) {
+  const message = String(body.msg || body.message || body.error_description || body.error || "Signup failed");
+  if (/already|registered|duplicate|unique/i.test(message)) return "That username is already taken.";
+  return message;
 }

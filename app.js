@@ -261,30 +261,10 @@
     const email = authEmailForUsername(username);
     const password = payload.password;
     if (mode === "signup") {
-      const { data: existingProfile, error: profileError } = await supabaseClient
-        .from("profiles")
-        .select("id")
-        .eq("username", username)
-        .maybeSingle();
-      if (profileError) throw profileError;
-      if (existingProfile) throw new Error("That username is already taken.");
-
-      const { data, error } = await supabaseClient.auth.signUp({
-        email,
-        password,
-        options: {
-          data: {
-            username,
-            display_name: username,
-            auth_type: "username",
-          },
-        },
-      });
+      await createConfirmedSupabaseUser(username, password);
+      const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
       if (error) throw error;
       if (!data.user) throw new Error("Signup failed. Please try again.");
-      if (!data.session) {
-        throw new Error("Email confirmations are still on in Supabase. Turn them off, then try again.");
-      }
       const profile = await ensureProfile(data.user, username);
       await loadRemotePredictions(data.user.id);
       return userFromProfile(data.user, profile);
@@ -295,6 +275,19 @@
     await setUserFromSupabase(data.user);
     await loadRemotePredictions(data.user.id);
     return state.user;
+  }
+
+  async function createConfirmedSupabaseUser(username, password) {
+    const response = await fetch(`${API_BASE}/api/supabase-signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || "Signup failed");
+    }
+    return data.user;
   }
 
   async function signInWithGoogle() {
