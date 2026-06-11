@@ -434,10 +434,16 @@
       state.bracketFinalizedAt = tournamentPrediction.locked_at || "";
     }
 
-    const { data: matchPredictions } = await supabaseClient
+    const { data: matchPredictions, error: matchSelectError } = await supabaseClient
       .from("match_predictions")
       .select("fixture_id, predicted_home_score, predicted_away_score, predicted_outcome, locked_at, fixtures(fifa_match_id)")
       .eq("user_id", userId);
+    if (matchSelectError) throw matchSelectError;
+
+    if (!tournamentPrediction && !matchPredictions?.length) {
+      restoreLocalPredictionsForUser(state.user);
+      return;
+    }
 
     if (matchPredictions?.length) {
       matchPredictions.forEach((prediction) => {
@@ -722,8 +728,15 @@
       flashSave("Finish every knockout pick first");
       return;
     }
+    const previousFinalizedAt = state.bracketFinalizedAt;
     state.bracketFinalizedAt = new Date().toISOString();
-    await persist();
+    const saved = await persist();
+    if (!saved) {
+      state.bracketFinalizedAt = previousFinalizedAt;
+      persistLocalState();
+      refreshAll();
+      return;
+    }
     refreshAll();
     flashSave("Bracket submitted");
   }
@@ -742,13 +755,21 @@
       flashSave("Enter score and result first");
       return;
     }
+    const previousPrediction = state.matchPredictions[matchId] || {};
     state.matchPredictions[matchId] = {
       home,
       away,
       outcome,
       finalizedAt: new Date().toISOString(),
     };
-    await persist();
+    const saved = await persist();
+    if (!saved) {
+      state.matchPredictions[matchId] = previousPrediction;
+      persistLocalState();
+      renderMatches();
+      renderStanding();
+      return;
+    }
     renderMatches();
     renderStanding();
     flashSave("Match submitted");
@@ -1012,17 +1033,18 @@
         await saveToSupabase();
       } catch (error) {
         flashSave(error.message || "Supabase save failed");
-        return;
+        return false;
       }
     } else if (LOCAL_API_ENABLED && state.user) {
       try {
         await apiPost("/api/save", serializeSubmission());
       } catch (error) {
         flashSave("Saved locally; spreadsheet offline");
-        return;
+        return false;
       }
     }
     flashSave("Saved");
+    return true;
   }
 
   function persistLocalState() {
@@ -1065,22 +1087,26 @@
   }
 
   async function saveMatchPredictions() {
-    const entries = Object.entries(state.matchPredictions)
-      .map(([matchId, prediction]) => {
-        const fixtureId = fixtureIdByMatchId[matchId];
-        if (!fixtureId || prediction.home === "" || prediction.away === "") return null;
-        const fixture = getLiveFixtures().find((match) => match.id === matchId);
-        return {
-          user_id: state.user.id,
-          fixture_id: fixtureId,
-          predicted_home_score: Number(prediction.home),
-          predicted_away_score: Number(prediction.away),
-          predicted_outcome: String(prediction.outcome || "").toLowerCase(),
-          locked_at: prediction.finalizedAt || null,
-          updated_at: new Date().toISOString(),
-        };
-      })
-      .filter(Boolean);
+    const entries = [];
+    Object.entries(state.matchPredictions).forEach(([matchId, prediction]) => {
+      if (prediction.home === "" || prediction.away === "") return;
+      const fixtureId = fixtureIdByMatchId[matchId];
+      if (!fixtureId) {
+        if (prediction.finalizedAt) {
+          throw new Error("Match schedule is not synced to Supabase yet.");
+        }
+        return;
+      }
+      entries.push({
+        user_id: state.user.id,
+        fixture_id: fixtureId,
+        predicted_home_score: Number(prediction.home),
+        predicted_away_score: Number(prediction.away),
+        predicted_outcome: String(prediction.outcome || "").toLowerCase(),
+        locked_at: prediction.finalizedAt || null,
+        updated_at: new Date().toISOString(),
+      });
+    });
 
     if (!entries.length) return;
     const { error } = await supabaseClient.from("match_predictions").upsert(entries, {
