@@ -261,7 +261,11 @@
         state.user = await authenticateWithSupabase(mode, payload);
       } else if (LOCAL_API_ENABLED) {
         const response = await apiPost(`/api/${mode}`, payload);
+        const previousUserKey = userSaveKey(state.user);
         state.user = response.user;
+        if (userSaveKey(state.user) !== previousUserKey) {
+          restoreLocalPredictionsForUser(state.user);
+        }
       } else {
         throw new Error(supabaseInitError || "Supabase is not configured for this deployment.");
       }
@@ -290,8 +294,10 @@
           email: "",
           avatar_url: "",
         };
+      const nextUser = userFromProfile(data.user, profile);
+      state.user = nextUser;
       await loadRemotePredictions(data.user.id);
-      return userFromProfile(data.user, profile);
+      return nextUser;
     }
 
     const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
@@ -409,6 +415,8 @@
   }
 
   async function loadRemotePredictions(userId) {
+    resetPredictions();
+
     const { data: tournamentPrediction } = await supabaseClient
       .from("tournament_predictions")
       .select("group_rankings, third_place_qualifiers, knockout_picks")
@@ -416,9 +424,9 @@
       .maybeSingle();
 
     if (tournamentPrediction) {
-      state.groups = tournamentPrediction.group_rankings || state.groups;
-      state.thirdQualifiers = tournamentPrediction.third_place_qualifiers || state.thirdQualifiers;
-      state.knockoutPicks = tournamentPrediction.knockout_picks || state.knockoutPicks;
+      state.groups = tournamentPrediction.group_rankings || cloneGroups(initialGroups);
+      state.thirdQualifiers = tournamentPrediction.third_place_qualifiers || defaultThirdQualifiers();
+      state.knockoutPicks = tournamentPrediction.knockout_picks || {};
     }
 
     const { data: matchPredictions } = await supabaseClient
@@ -427,7 +435,6 @@
       .eq("user_id", userId);
 
     if (matchPredictions?.length) {
-      state.matchPredictions = {};
       matchPredictions.forEach((prediction) => {
         const matchId = prediction.fixtures?.fifa_match_id;
         if (!matchId) return;
@@ -438,7 +445,7 @@
         };
       });
     }
-    localStorage.setItem(SAVE_KEY, JSON.stringify(state));
+    persistLocalState();
   }
 
   async function loadFixturesFromSupabase() {
@@ -923,7 +930,7 @@
   }
 
   async function persist() {
-    localStorage.setItem(SAVE_KEY, JSON.stringify(state));
+    persistLocalState();
     if (supabaseReady && state.user?.id) {
       try {
         await saveToSupabase();
@@ -940,6 +947,14 @@
       }
     }
     flashSave("Saved");
+  }
+
+  function persistLocalState() {
+    localStorage.setItem(SAVE_KEY, JSON.stringify(state));
+    const key = userSaveKey(state.user);
+    if (key) {
+      localStorage.setItem(key, JSON.stringify(state));
+    }
   }
 
   async function saveToSupabase() {
@@ -1141,6 +1156,33 @@
 
   function cloneGroups(groups) {
     return JSON.parse(JSON.stringify(groups));
+  }
+
+  function resetPredictions() {
+    state.groups = cloneGroups(initialGroups);
+    state.thirdQualifiers = defaultThirdQualifiers();
+    state.knockoutPicks = {};
+    state.matchPredictions = {};
+  }
+
+  function restoreLocalPredictionsForUser(user) {
+    resetPredictions();
+    const saved = localStorage.getItem(userSaveKey(user));
+    if (!saved) return;
+    try {
+      const parsed = JSON.parse(saved);
+      state.groups = parsed.groups || cloneGroups(initialGroups);
+      state.thirdQualifiers = parsed.thirdQualifiers || defaultThirdQualifiers();
+      state.knockoutPicks = parsed.knockoutPicks || {};
+      state.matchPredictions = parsed.matchPredictions || {};
+    } catch (error) {
+      console.warn("Could not parse saved user predictions", error);
+    }
+  }
+
+  function userSaveKey(user) {
+    if (!user) return "";
+    return `${SAVE_KEY}:user:${user.id || user.username || ""}`;
   }
 
   function team(code, name) {
