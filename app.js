@@ -108,6 +108,8 @@
       "thirdCounter",
       "knockoutGrid",
       "placementGrid",
+      "bracketSubmitStatus",
+      "finalizeBracket",
       "projectedScore",
       "lockNote",
       "saveStatus",
@@ -155,6 +157,8 @@
       persist();
       refreshAll();
     });
+
+    dom.finalizeBracket.addEventListener("click", finalizeBracketPrediction);
 
     dom.refreshMatches.addEventListener("click", () => {
       renderMatches();
@@ -419,7 +423,7 @@
 
     const { data: tournamentPrediction } = await supabaseClient
       .from("tournament_predictions")
-      .select("group_rankings, third_place_qualifiers, knockout_picks")
+      .select("group_rankings, third_place_qualifiers, knockout_picks, locked_at")
       .eq("user_id", userId)
       .maybeSingle();
 
@@ -427,11 +431,12 @@
       state.groups = tournamentPrediction.group_rankings || cloneGroups(initialGroups);
       state.thirdQualifiers = normalizeThirdQualifiers(tournamentPrediction.third_place_qualifiers || defaultThirdQualifiers());
       state.knockoutPicks = tournamentPrediction.knockout_picks || {};
+      state.bracketFinalizedAt = tournamentPrediction.locked_at || "";
     }
 
     const { data: matchPredictions } = await supabaseClient
       .from("match_predictions")
-      .select("fixture_id, predicted_home_score, predicted_away_score, predicted_outcome, fixtures(fifa_match_id)")
+      .select("fixture_id, predicted_home_score, predicted_away_score, predicted_outcome, locked_at, fixtures(fifa_match_id)")
       .eq("user_id", userId);
 
     if (matchPredictions?.length) {
@@ -442,6 +447,7 @@
           home: String(prediction.predicted_home_score),
           away: String(prediction.predicted_away_score),
           outcome: titleCase(prediction.predicted_outcome),
+          finalizedAt: prediction.locked_at || "",
         };
       });
     }
@@ -480,6 +486,7 @@
 
   function refreshAll() {
     renderHeader();
+    renderBracketSubmit();
     renderGroups();
     renderThirds();
     renderKnockout();
@@ -490,12 +497,26 @@
   }
 
   function renderHeader() {
-    const locked = Date.now() >= TOURNAMENT_START.getTime();
+    const locked = isTournamentStarted();
     dom.lockNote.textContent = locked
       ? "Whole bracket is locked because the World Cup has started."
       : "Points stay 0 until official results are loaded.";
     dom.authButton.textContent = state.user ? state.user.username : "Log in / Sign up";
     dom.projectedScore.textContent = `${calculateBracketScore().toFixed(1)} pts`;
+  }
+
+  function renderBracketSubmit() {
+    const complete = isBracketComplete();
+    const finalized = Boolean(state.bracketFinalizedAt);
+    dom.bracketSubmitStatus.textContent = finalized
+      ? `Submitted ${formatDate(state.bracketFinalizedAt)}`
+      : complete
+      ? "Ready to submit. Draft already autosaves."
+      : "Draft autosaves while you complete every knockout pick.";
+    dom.finalizeBracket.textContent = finalized ? "Bracket submitted" : "Submit bracket";
+    dom.finalizeBracket.disabled = finalized || !complete || !state.user || isTournamentStarted();
+    dom.resetGroups.disabled = finalized || isTournamentStarted();
+    dom.clearKnockout.disabled = finalized || isTournamentStarted();
   }
 
   function renderGroups() {
@@ -637,8 +658,10 @@
       const shouldFade = !isNearest && (!canPredict || match.kickoff < now);
       const card = el("article", `match-card${isNearest ? " nearest" : ""}${shouldFade ? " faded" : ""}`);
       const prediction = state.matchPredictions[match.id] || {};
+      const finalized = Boolean(prediction.finalizedAt);
+      const canEdit = canPredict && !finalized;
       const resultText = match.result ? `Result ${match.result.home}-${match.result.away}` : "Result pending";
-      const status = match.result ? scorePredictionLabel(match, prediction) : canPredict ? "Open" : "Locked";
+      const status = finalized ? "Submitted" : match.result ? scorePredictionLabel(match, prediction) : canPredict ? "Open" : "Locked";
       card.innerHTML = `
         <div>
           <div class="match-teams">${escapeHtml(match.home)} vs ${escapeHtml(match.away)}</div>
@@ -646,10 +669,10 @@
         </div>
       `;
       const box = el("div", "prediction-box");
-      const home = scoreInput(prediction.home, canPredict);
-      const away = scoreInput(prediction.away, canPredict);
+      const home = scoreInput(prediction.home, canEdit);
+      const away = scoreInput(prediction.away, canEdit);
       const select = el("select");
-      select.disabled = !canPredict;
+      select.disabled = !canEdit;
       const outcomes = match.round.startsWith("group") ? ["Home", "Draw", "Away"] : ["Home", "Away"];
       outcomes.forEach((outcome) => {
         const option = el("option");
@@ -664,16 +687,71 @@
             home: home.value,
             away: away.value,
             outcome: select.value,
-            lockedAt: match.kickoff,
+            finalizedAt: prediction.finalizedAt || "",
           };
           persist();
           renderStanding();
+          submit.disabled = !canPredict || !state.user || !isMatchPredictionComplete({ home: home.value, away: away.value, outcome: select.value });
         });
       });
-      box.append(home, away, select);
+      const submit = el("button", "primary-button small match-submit");
+      submit.type = "button";
+      submit.textContent = finalized ? "Submitted" : "Submit";
+      submit.disabled = finalized || !canPredict || !state.user || !isMatchPredictionComplete({ home: home.value, away: away.value, outcome: select.value });
+      submit.addEventListener("click", () => finalizeMatchPrediction(match.id, home.value, away.value, select.value));
+      box.append(home, away, select, submit);
       card.appendChild(box);
       dom.matchesList.appendChild(card);
     });
+  }
+
+  async function finalizeBracketPrediction() {
+    if (!state.user) {
+      flashSave("Log in before submitting");
+      return;
+    }
+    if (state.bracketFinalizedAt) {
+      flashSave("Bracket already submitted");
+      return;
+    }
+    if (isTournamentStarted()) {
+      flashSave("Bracket submission is closed");
+      return;
+    }
+    if (!isBracketComplete()) {
+      flashSave("Finish every knockout pick first");
+      return;
+    }
+    state.bracketFinalizedAt = new Date().toISOString();
+    await persist();
+    refreshAll();
+    flashSave("Bracket submitted");
+  }
+
+  async function finalizeMatchPrediction(matchId, home, away, outcome) {
+    if (!state.user) {
+      flashSave("Log in before submitting");
+      return;
+    }
+    const match = getLiveFixtures().find((item) => item.id === matchId);
+    if (!match || match.kickoff <= Date.now()) {
+      flashSave("Match submission is closed");
+      return;
+    }
+    if (!isMatchPredictionComplete({ home, away, outcome })) {
+      flashSave("Enter score and result first");
+      return;
+    }
+    state.matchPredictions[matchId] = {
+      home,
+      away,
+      outcome,
+      finalizedAt: new Date().toISOString(),
+    };
+    await persist();
+    renderMatches();
+    renderStanding();
+    flashSave("Match submitted");
   }
 
   function renderStanding() {
@@ -969,7 +1047,7 @@
       third_place_qualifiers: state.thirdQualifiers,
       knockout_picks: state.knockoutPicks,
       final_placements: calculatePlacements(),
-      locked_at: isBracketLocked() ? new Date(TOURNAMENT_START).toISOString() : null,
+      locked_at: state.bracketFinalizedAt || null,
       updated_at: new Date().toISOString(),
     };
 
@@ -998,7 +1076,7 @@
           predicted_home_score: Number(prediction.home),
           predicted_away_score: Number(prediction.away),
           predicted_outcome: String(prediction.outcome || "").toLowerCase(),
-          locked_at: fixture ? new Date(fixture.kickoff).toISOString() : null,
+          locked_at: prediction.finalizedAt || null,
           updated_at: new Date().toISOString(),
         };
       })
@@ -1121,6 +1199,7 @@
           thirdQualifiers: normalizeThirdQualifiers(parsed.thirdQualifiers || defaultThirdQualifiers()),
           knockoutPicks: parsed.knockoutPicks || {},
           matchPredictions: parsed.matchPredictions || {},
+          bracketFinalizedAt: parsed.bracketFinalizedAt || "",
           user: parsed.user || null,
         };
       } catch (error) {
@@ -1132,6 +1211,7 @@
       thirdQualifiers: defaultThirdQualifiers(),
       knockoutPicks: {},
       matchPredictions: {},
+      bracketFinalizedAt: "",
       user: null,
     };
   }
@@ -1145,7 +1225,22 @@
   }
 
   function isBracketLocked() {
+    return Boolean(state.bracketFinalizedAt) || isTournamentStarted();
+  }
+
+  function isTournamentStarted() {
     return Date.now() >= TOURNAMENT_START.getTime();
+  }
+
+  function isBracketComplete() {
+    if (state.thirdQualifiers.length !== 8) return false;
+    return buildKnockoutRounds().every((round) =>
+      round.matches.every((match) => match.teams.every(Boolean) && Boolean(state.knockoutPicks[match.id]))
+    );
+  }
+
+  function isMatchPredictionComplete(prediction) {
+    return prediction.home !== "" && prediction.away !== "" && Boolean(prediction.outcome);
   }
 
   function defaultThirdQualifiers() {
@@ -1167,6 +1262,7 @@
     state.thirdQualifiers = defaultThirdQualifiers();
     state.knockoutPicks = {};
     state.matchPredictions = {};
+    state.bracketFinalizedAt = "";
   }
 
   function restoreLocalPredictionsForUser(user) {
@@ -1179,6 +1275,7 @@
       state.thirdQualifiers = normalizeThirdQualifiers(parsed.thirdQualifiers || defaultThirdQualifiers());
       state.knockoutPicks = parsed.knockoutPicks || {};
       state.matchPredictions = parsed.matchPredictions || {};
+      state.bracketFinalizedAt = parsed.bracketFinalizedAt || "";
     } catch (error) {
       console.warn("Could not parse saved user predictions", error);
     }

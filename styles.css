@@ -309,6 +309,12 @@ main {
   color: white;
 }
 
+.primary-button.small {
+  min-height: 36px;
+  padding: 0 12px;
+  font-size: 0.82rem;
+}
+
 .icon-button {
   width: 38px;
   min-height: 38px;
@@ -439,6 +445,22 @@ main {
   cursor: not-allowed;
 }
 
+.submit-strip {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.submit-strip p {
+  margin-bottom: 0;
+}
+
 .knockout-grid {
   display: grid;
   grid-auto-flow: column;
@@ -563,7 +585,7 @@ main {
 
 .prediction-box {
   display: grid;
-  grid-template-columns: 54px 54px 120px;
+  grid-template-columns: 54px 54px 120px 92px;
   gap: 8px;
   align-items: center;
 }
@@ -583,6 +605,10 @@ main {
   border-radius: 8px;
   background: white;
   padding: 0 8px;
+}
+
+.match-submit {
+  width: 92px;
 }
 
 .standing-layout {
@@ -707,7 +733,14 @@ main {
     grid-template-columns: 1fr 1fr;
   }
 
-  .prediction-box select {
+  .prediction-box select,
+  .match-submit {
     grid-column: span 2;
+    width: 100%;
+  }
+
+  .submit-strip {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
