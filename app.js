@@ -350,7 +350,7 @@
     if (existing) return existing;
 
     if (isInternalAuthEmail(authUser.email)) {
-      throw new Error("Profile was not created. Run the Supabase trigger fix, then sign up again.");
+      return repairSupabaseProfile(authUser.id, fallbackUsername);
     }
 
     return createOwnProfile({
@@ -384,6 +384,19 @@
       throw error;
     }
     return data;
+  }
+
+  async function repairSupabaseProfile(userId, username) {
+    const response = await fetch(`${API_BASE}/api/supabase-profile`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, username }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.error || "Profile could not be created.");
+    }
+    return data.profile;
   }
 
   function userFromProfile(authUser, profile) {

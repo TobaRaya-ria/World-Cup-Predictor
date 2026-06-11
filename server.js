@@ -40,6 +40,9 @@ const server = http.createServer(async (request, response) => {
     if (request.url === "/api/supabase-signup" && request.method === "POST") {
       return handleSupabaseSignup(request, response);
     }
+    if (request.url === "/api/supabase-profile" && request.method === "POST") {
+      return handleSupabaseProfile(request, response);
+    }
     if (request.url === "/api/login" && request.method === "POST") {
       return handleLogin(request, response);
     }
@@ -115,6 +118,22 @@ async function handleSupabaseSignup(request, response) {
     });
   } catch (error) {
     return sendJson(response, error.status || 500, { error: error.message || "Signup failed" });
+  }
+}
+
+async function handleSupabaseProfile(request, response) {
+  const body = await readJson(request);
+  const userId = String(body.userId || "").trim();
+  const username = normalizeUsername(body.username);
+  if (!isUuid(userId) || !isValidUsername(username)) {
+    return sendJson(response, 400, { error: "Valid user id and username are required." });
+  }
+
+  try {
+    const profile = await repairSupabaseProfile(userId, username);
+    return sendJson(response, 200, { profile });
+  } catch (error) {
+    return sendJson(response, error.status || 500, { error: error.message || "Profile could not be created." });
   }
 }
 
@@ -299,6 +318,10 @@ function isValidUsername(username) {
   return /^[a-z0-9_]{3,24}$/.test(username);
 }
 
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
 function authEmailForUsername(username) {
   return `${normalizeUsername(username)}@${INTERNAL_AUTH_DOMAIN}`;
 }
@@ -345,6 +368,17 @@ async function createSupabaseUser(username, password) {
 
   const profile = await upsertSupabaseProfile(supabaseUrl, serviceRoleKey, user.id, username);
   return { user, profile };
+}
+
+async function repairSupabaseProfile(userId, username) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+  if (!supabaseUrl || !serviceRoleKey) {
+    const error = new Error("Supabase service role key is missing on the server.");
+    error.status = 500;
+    throw error;
+  }
+  return upsertSupabaseProfile(supabaseUrl, serviceRoleKey, userId, username);
 }
 
 async function assertSupabaseUsernameAvailable(supabaseUrl, serviceRoleKey, username) {
