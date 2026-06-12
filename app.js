@@ -436,7 +436,7 @@
 
     const { data: matchPredictions, error: matchSelectError } = await supabaseClient
       .from("match_predictions")
-      .select("fixture_id, predicted_home_score, predicted_away_score, predicted_outcome, locked_at, fixtures(fifa_match_id)")
+      .select("fixture_id, predicted_home_score, predicted_away_score, predicted_outcome, locked_at")
       .eq("user_id", userId);
     if (matchSelectError) throw matchSelectError;
 
@@ -446,8 +446,21 @@
     }
 
     if (matchPredictions?.length) {
+      const fixtureIds = [...new Set(matchPredictions.map((prediction) => prediction.fixture_id).filter(Boolean))];
+      const fixtureMap = {};
+      if (fixtureIds.length) {
+        const { data: fixtures, error: fixtureSelectError } = await supabaseClient
+          .from("fixtures")
+          .select("id, fifa_match_id")
+          .in("id", fixtureIds);
+        if (fixtureSelectError) throw fixtureSelectError;
+        fixtures?.forEach((fixture) => {
+          fixtureMap[fixture.id] = fixture.fifa_match_id;
+        });
+      }
+
       matchPredictions.forEach((prediction) => {
-        const matchId = prediction.fixtures?.fifa_match_id;
+        const matchId = fixtureMap[prediction.fixture_id];
         if (!matchId) return;
         state.matchPredictions[matchId] = {
           home: String(prediction.predicted_home_score),

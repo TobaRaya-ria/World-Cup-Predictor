@@ -53,20 +53,16 @@ async function upsertSupabaseProfile(supabaseUrl, serviceRoleKey, userId, userna
 }
 
 async function upsertTournamentPrediction(supabaseUrl, serviceRoleKey, userId, submission) {
-  const response = await fetch(`${supabaseUrl}/rest/v1/tournament_predictions?on_conflict=user_id`, {
-    method: "POST",
-    headers: supabaseJsonHeaders(serviceRoleKey, "resolution=merge-duplicates"),
-    body: JSON.stringify({
-      user_id: userId,
-      group_rankings: submission.groups || {},
-      third_place_qualifiers: submission.thirdQualifiers || [],
-      knockout_picks: submission.knockoutPicks || {},
-      final_placements: submission.finalPlacements || {},
-      locked_at: submission.bracketFinalizedAt || null,
-      updated_at: new Date().toISOString(),
-    }),
-  });
-  await assertSupabaseOk(response);
+  const payload = {
+    user_id: userId,
+    group_rankings: submission.groups || {},
+    third_place_qualifiers: submission.thirdQualifiers || [],
+    knockout_picks: submission.knockoutPicks || {},
+    final_placements: submission.finalPlacements || {},
+    locked_at: submission.bracketFinalizedAt || null,
+    updated_at: new Date().toISOString(),
+  };
+  await writeSingleByFilters(supabaseUrl, serviceRoleKey, "tournament_predictions", { user_id: userId }, payload);
 }
 
 async function upsertMatchPredictions(supabaseUrl, serviceRoleKey, userId, matchPredictions) {
@@ -90,30 +86,29 @@ async function upsertMatchPredictions(supabaseUrl, serviceRoleKey, userId, match
     });
   });
   if (!entries.length) return 0;
-  const response = await fetch(`${supabaseUrl}/rest/v1/match_predictions?on_conflict=user_id,fixture_id`, {
-    method: "POST",
-    headers: supabaseJsonHeaders(serviceRoleKey, "resolution=merge-duplicates"),
-    body: JSON.stringify(entries),
-  });
-  await assertSupabaseOk(response);
+  for (const entry of entries) {
+    await writeSingleByFilters(
+      supabaseUrl,
+      serviceRoleKey,
+      "match_predictions",
+      { user_id: userId, fixture_id: entry.fixture_id },
+      entry
+    );
+  }
   return entries.length;
 }
 
 async function upsertScoreSnapshot(supabaseUrl, serviceRoleKey, userId, submission) {
-  const response = await fetch(`${supabaseUrl}/rest/v1/scores?on_conflict=user_id`, {
-    method: "POST",
-    headers: supabaseJsonHeaders(serviceRoleKey, "resolution=merge-duplicates"),
-    body: JSON.stringify({
-      user_id: userId,
-      bracket_score: Number(submission.bracketScore || 0),
-      match_score: Number(submission.matchScore || 0),
-      total_score: Number(submission.totalScore || 0),
-      exact_scores_count: 0,
-      correct_results_count: 0,
-      updated_at: new Date().toISOString(),
-    }),
-  });
-  await assertSupabaseOk(response);
+  const payload = {
+    user_id: userId,
+    bracket_score: Number(submission.bracketScore || 0),
+    match_score: Number(submission.matchScore || 0),
+    total_score: Number(submission.totalScore || 0),
+    exact_scores_count: 0,
+    correct_results_count: 0,
+    updated_at: new Date().toISOString(),
+  };
+  await writeSingleByFilters(supabaseUrl, serviceRoleKey, "scores", { user_id: userId }, payload);
 }
 
 async function loadSupabaseFixtureMap(supabaseUrl, serviceRoleKey) {
@@ -129,12 +124,40 @@ async function loadSupabaseFixtureMap(supabaseUrl, serviceRoleKey) {
 }
 
 function supabaseJsonHeaders(serviceRoleKey, prefer) {
-  return {
+  const headers = {
     apikey: serviceRoleKey,
     Authorization: `Bearer ${serviceRoleKey}`,
     "Content-Type": "application/json",
-    Prefer: prefer,
   };
+  if (prefer) headers.Prefer = prefer;
+  return headers;
+}
+
+async function writeSingleByFilters(supabaseUrl, serviceRoleKey, table, filters, payload) {
+  const query = Object.entries(filters)
+    .map(([key, value]) => `${encodeURIComponent(key)}=eq.${encodeURIComponent(value)}`)
+    .join("&");
+  const existingResponse = await fetch(`${supabaseUrl}/rest/v1/${table}?select=id&${query}&limit=1`, {
+    headers: {
+      apikey: serviceRoleKey,
+      Authorization: `Bearer ${serviceRoleKey}`,
+    },
+  });
+  await assertSupabaseOk(existingResponse);
+  const existing = await existingResponse.json();
+
+  const writeResponse = existing.length
+    ? await fetch(`${supabaseUrl}/rest/v1/${table}?id=eq.${encodeURIComponent(existing[0].id)}`, {
+        method: "PATCH",
+        headers: supabaseJsonHeaders(serviceRoleKey, ""),
+        body: JSON.stringify(payload),
+      })
+    : await fetch(`${supabaseUrl}/rest/v1/${table}`, {
+        method: "POST",
+        headers: supabaseJsonHeaders(serviceRoleKey, ""),
+        body: JSON.stringify(payload),
+      });
+  await assertSupabaseOk(writeResponse);
 }
 
 async function assertSupabaseOk(response) {
